@@ -100,6 +100,7 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
     spec = importlib.util.spec_from_file_location("installed_clamav_gui", str(INSTALLED_PY))
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
 
     # Launch installed window headlessly if no display, or against live Xvfb/Wayland/X11 if available

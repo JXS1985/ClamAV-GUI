@@ -93,9 +93,19 @@ Standard users and Sysadmins can enter any custom log path (e.g., `/tmp/myscan.l
 |---|---|---|---|
 | High: Custom log path rejection silent failure | Surface `_on_inspect_done` errors in `log_hint_lbl` + add `/var/log/` tooltips on `log_path_edit` and `new_log_edit` | `test_mockup_lang_pills_tiles_inspect_error_and_german_history` | ✅ unit/UI test |
 | Medium: German UI residual English strings | Localized `also_missing_suffix`, `history_system_log`, `svc_active`/`svc_inactive` | `test_mockup_lang_pills_tiles_inspect_error_and_german_history` | ✅ unit/UI test |
-| Medium: openSUSE Qt6 `Recommends:` gap | Changed openSUSE RPM spec block in `build_packages.sh` to `Requires: (python3-pyside6 or python3-qt6 or python3-pyqt6)` | Local `rpmbuild` + Podman openSUSE matrix test | ✅ Podman pending |
+| Medium: openSUSE Qt6 `Recommends:` gap | Changed openSUSE RPM spec block in `build_packages.sh` to `Requires: (python3-pyside6 or python3-qt6 or python3-pyqt6)` | Local `rpmbuild` + Podman openSUSE matrix runs (`lp160`, `lp161`, `tw`) | ✅ verified on Leap 16.0, Leap 16.1, Tumbleweed |
 | Medium: Polkit source-checkout silent fallback | Added localized `polkit_source_hint` tooltip on `auth_lbl` explaining system package install requirement | Updated UI verified | ✅ unit/UI test |
-| New: `Gio.DesktopAppInfo.new()` shadow risk | Switched `verify_installed_os.py` from `.new(name)` to `.new_from_filename(INSTALLED_DESKTOP)` | `test_helper_client_timeout_nopass_pkexec_and_verify_os_script` | ✅ unit + Podman |
+| New: `Gio.DesktopAppInfo.new()` shadow risk | Switched `verify_installed_os.py` from `.new(name)` to `.new_from_filename(INSTALLED_DESKTOP)` | `test_helper_client_timeout_nopass_pkexec_and_verify_os_script` + Podman | ✅ verified across all 6 distros |
 | Coverage: `HelperClient` timeout/nopass + `verify_installed_os.py` | Added unit coverage for `HelperClient.call` timeout, `start_with_sudo_nopass`, `_helper_get_schedule`, and `verify_installed_os.py` | `test_helper_client_timeout_nopass_pkexec_and_verify_os_script` | ✅ unit test |
-| UI upgrade (`mockup_1_protected_home`) | Added vector shield/tile `QPainter` graphics, `ScanTileButton`, segmented `EN / DE` pill, unified `#StatsStrip`, centered link footer | `TestUIInitialLayoutAndCompactMode` + `test_mockup_lang_pills_tiles_inspect_error_and_german_history` | ✅ unit/UI test |
+| UI upgrade (`mockup_1_protected_home`) | Added vector shield/tile `QPainter` graphics, `ScanTileButton`, segmented `EN / DE` pill, unified `#StatsStrip`, centered link footer, word-wrapped `meta_lbl`, scrollable tab container (`QScrollArea`) | `TestUIInitialLayoutAndCompactMode` + `test_mockup_lang_pills_tiles_inspect_error_and_german_history` | ✅ host + all 6 Podman distros |
+| CI & runtime portability fixes (Podman) | Scoped `--self-test` root log path to `/var/log/`; registered `sys.modules[spec.name]` in `verify_installed_os.py` for Python 3.14 `@dataclass`; added `HelperClient._spawn_auth_process` (`OSError` guard); separated EL10 missing `xorg-x11-server-Xvfb` in `.gitea/workflows/ci.yml`; made container UID/DE/Xvfb test mocks explicit | `test_helper_client_auth_wrappers_and_disconnect` + full 53-test suite & Podman CI | ✅ all 6 Podman distros passed (`exit 0`) |
+
+### Podman Gitea CI Matrix Verification Results
+All 6 target distributions ran the full 6-stage `.gitea/workflows/ci.yml` sequence (dependency install, desktop portal/Qt6 setup, `--self-test`, 53 unit/UI tests, `.rpm`/`.deb` build & install, `verify_installed_os.py`, EN/DE GUI smoke):
+- `registry.opensuse.org/opensuse/leap:16.0` (`kde`, `lp160`, RPM): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
+- `registry.opensuse.org/opensuse/leap:16.1` (`gnome`, `lp161`, RPM): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
+- `docker.io/opensuse/tumbleweed:latest` (`gnome`, `tw`, RPM): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
+- `docker.io/rockylinux/rockylinux:10` (`kde`, `el10`, RPM): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
+- `registry.fedoraproject.org/fedora:45` (`gnome`, `fc45`, RPM): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
+- `docker.io/library/ubuntu:26.04` (`kde`, `kubuntu2604`, DEB): **PASS** (`53/53`, package & DE checks passed, EN/DE smoke OK)
 

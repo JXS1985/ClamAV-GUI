@@ -109,7 +109,10 @@ class TestFormattingAndParsers(unittest.TestCase):
         self.assertEqual(app_mod.extract_log_path_from_cmdline(cmd), "/tmp/custom-clam.log")
         self.assertEqual(app_mod.extract_log_path_from_cmdline(["clamscan", "-l", "/var/log/a.log", "/"]), "/var/log/a.log")
         self.assertEqual(app_mod.extract_log_path_from_cmdline(["clamscan", "--log", "/var/log/b.log", "/"]), "/var/log/b.log")
-        self.assertEqual(app_mod.extract_log_path_from_cmdline(["clamscan", "/tmp"]), app_mod.DEFAULT_LOG_PATH)
+        with mock.patch("os.path.exists", side_effect=lambda p: p == app_mod.DEFAULT_LOG_PATH):
+            self.assertEqual(app_mod.extract_log_path_from_cmdline(["clamscan", "/tmp"]), app_mod.DEFAULT_LOG_PATH)
+        with mock.patch("os.path.exists", return_value=False):
+            self.assertEqual(app_mod.extract_log_path_from_cmdline(["clamscan", "/tmp"]), "")
 
         parsed = app_mod.parse_scan_targets_and_limits(cmd)
         self.assertEqual(parsed["targets"], ["/home/user", "/tmp"])
@@ -382,7 +385,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
         self.assertFalse(app_mod._read_log_chunk("", 0)["exists"])
         self.assertFalse(app_mod._read_log_chunk("/nonexistent_xyz_123.log", 0)["exists"])
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("os.geteuid", return_value=1000):
             log_file = Path(tmpdir) / "scan.log"
             log_file.write_text("line1\nline2\n", encoding="utf-8")
 
@@ -413,7 +416,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             self.assertEqual(os.stat(log_file).st_mode & 0o777, 0o644)
 
     def test_quarantine_lifecycle_collisions_and_delete_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("os.geteuid", return_value=1000):
             qdir = str(Path(tmpdir) / "quarantine")
             self.assertEqual(app_mod._helper_list_quarantine({"quarantine_dir": qdir})["items"], [])
 
@@ -500,7 +503,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
         with self.assertRaises(PermissionError):
             app_mod._helper_start_scan({"cmd_args": ["/bin/rm", "-rf", "/"]})
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("os.geteuid", return_value=1000):
             log_file = Path(tmpdir) / "scan.log"
             log_file.write_text("old data\n", encoding="utf-8")
             fake_proc = mock.Mock(pid=5555)
@@ -628,12 +631,22 @@ class TestHelperRPCSubprocessAndClient(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unknown action"):
                 client.call("no_such_action")
 
-            insp_res = client.call(
-                "inspect_proc",
-                {"pid": os.getpid(), "log_path": app_mod.SCRIPT_PATH, "log_offset": 0},
-            )
-            self.assertTrue(insp_res["proc"]["alive"])
-            self.assertTrue(insp_res["log"]["exists"])
+            # When helper runs as container root, non-root log/quarantine overrides must be refused
+            # while non-root helper processes (UID != 0) operate inside custom temp directories.
+            if os.geteuid() == 0:
+                insp_empty = client.call("inspect_proc", {"pid": os.getpid(), "log_path": "", "log_offset": 0})
+                self.assertTrue(insp_empty["proc"]["alive"])
+                with self.assertRaises(RuntimeError):
+                    client.call("inspect_proc", {"pid": os.getpid(), "log_path": app_mod.SCRIPT_PATH, "log_offset": 0})
+                with self.assertRaises(RuntimeError):
+                    client.call("quarantine_file", {"path": app_mod.SCRIPT_PATH, "quarantine_dir": "/tmp/evilq"})
+            else:
+                insp_res = client.call(
+                    "inspect_proc",
+                    {"pid": os.getpid(), "log_path": app_mod.SCRIPT_PATH, "log_offset": 0},
+                )
+                self.assertTrue(insp_res["proc"]["alive"])
+                self.assertTrue(insp_res["log"]["exists"])
 
             # signal_proc & set_priority must refuse non-clamscan processes
             with self.assertRaises(RuntimeError):
@@ -641,15 +654,16 @@ class TestHelperRPCSubprocessAndClient(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 client.call("set_priority", {"pid": os.getpid(), "mode": "idle"})
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                qdir = str(Path(tmpdir) / "q")
-                sample = Path(tmpdir) / "sample.dat"
-                sample.write_bytes(b"virus")
-                client.call("quarantine_file", {"path": str(sample), "quarantine_dir": qdir, "threat_name": "Sig.X"})
-                items = client.call("list_quarantine", {"quarantine_dir": qdir})["items"]
-                self.assertEqual(len(items), 1)
-                client.call("restore_quarantine", {"name": "sample.dat", "quarantine_dir": qdir})
-                self.assertTrue(sample.exists())
+            if os.geteuid() != 0:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    qdir = str(Path(tmpdir) / "q")
+                    sample = Path(tmpdir) / "sample.dat"
+                    sample.write_bytes(b"virus")
+                    client.call("quarantine_file", {"path": str(sample), "quarantine_dir": qdir, "threat_name": "Sig.X"})
+                    items = client.call("list_quarantine", {"quarantine_dir": qdir})["items"]
+                    self.assertEqual(len(items), 1)
+                    client.call("restore_quarantine", {"name": "sample.dat", "quarantine_dir": qdir})
+                    self.assertTrue(sample.exists())
         finally:
             client.close()
 
@@ -707,6 +721,18 @@ class TestHelperRPCSubprocessAndClient(unittest.TestCase):
             ok3, msg3 = client.start_with_pkexec()
         self.assertFalse(ok3)
         self.assertIn("cancelled", msg3.lower())
+
+        # Missing sudo / pkexec binaries degrade cleanly without raising FileNotFoundError
+        with mock.patch("subprocess.Popen", side_effect=FileNotFoundError("sudo")):
+            ok4, msg4 = client.start_with_sudo_nopass()
+            ok5, msg5 = client.start_with_sudo("pw")
+            ok6, msg6 = client.start_with_pkexec()
+        self.assertFalse(ok4)
+        self.assertFalse(ok5)
+        self.assertFalse(ok6)
+        self.assertIn("sudo", msg4)
+        self.assertIn("sudo", msg5)
+        self.assertIn("pkexec", msg6)
 
 
 class TestLocalizationAndCLI(unittest.TestCase):
@@ -903,8 +929,8 @@ class TestSecurityHardening(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 app_mod._resolve_quarantine_dir("/tmp/attacker_quarantine")
 
-        # Root-restored file from /etc/ must NOT be chowned to /home/<user>/
-        with tempfile.TemporaryDirectory() as tmpdir:
+        # Root-restored file from /var/secret must NOT be chowned to /home/<user>/
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("os.geteuid", return_value=1000):
             qdir = Path(tmpdir) / "q"
             qdir.mkdir()
             (qdir / "secret").write_bytes(b"rootdata")

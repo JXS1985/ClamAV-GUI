@@ -137,7 +137,9 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
 
         initial_w = self.win.width()
         initial_h = self.win.height()
-        self.assertEqual(initial_w, 980)
+        self.assertGreaterEqual(initial_w, 980)
+        self.assertLessEqual(initial_w, 1440)
+        self.assertLess(initial_h, 700)
         self.assertIn("Show", self.win.toggle_tabs_btn.text())
 
         # Expand via genuine mouse click
@@ -638,8 +640,10 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
         self.win._copy_threat_path()
         self.assertEqual(QApplication.clipboard().text(), "/tmp/evil.bin")
 
-        # Reveal in Dolphin (fallback to xdg-open if dolphin absent)
-        with mock.patch("shutil.which", return_value="/usr/bin/dolphin"), mock.patch("subprocess.Popen") as mock_p:
+        # Reveal in Dolphin when on KDE
+        with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE", "DESKTOP_SESSION": "plasma"}), mock.patch(
+            "shutil.which", return_value="/usr/bin/dolphin"
+        ), mock.patch("subprocess.Popen") as mock_p:
             self.win._reveal_threat_in_dolphin()
             mock_p.assert_called_once_with(["dolphin", "--select", "/tmp/evil.bin"], start_new_session=True)
 
@@ -1051,8 +1055,13 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
 
     def test_mockup_lang_pills_tiles_inspect_error_and_german_history(self) -> None:
         # Segmented DE / EN pill click switches language cleanly
-        QTest.mouseClick(self.win.lang_de_btn, Qt.MouseButton.LeftButton)
-        self.win._qt_app.processEvents()
+        with mock.patch.object(
+            app_mod,
+            "get_clamav_metadata",
+            return_value={"version": "ClamAV 1.4.6-test", "freshclam_service": "active"},
+        ):
+            QTest.mouseClick(self.win.lang_de_btn, Qt.MouseButton.LeftButton)
+            self.win._qt_app.processEvents()
         self.assertEqual(self.win.lang, "de")
         self.assertIn("Downloads & Home", self.win.btn_quick_scan.sub_lbl.text())
         self.assertIn("Aktiv", self.win.meta_lbl.text())

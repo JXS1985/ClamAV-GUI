@@ -129,8 +129,9 @@ jobs:
               fi
               ${SUDO} dnf install -y \
                 python3 python3-pip clamav clamav-freshclam findutils util-linux polkit procps-ng \
-                libnotify rpm-build desktop-file-utils glib2 xorg-x11-server-Xvfb \
+                libnotify rpm-build desktop-file-utils glib2 \
                 mesa-dri-drivers libxkbcommon libxkbcommon-x11 tar gzip || true
+              ${SUDO} dnf install -y xorg-x11-server-Xvfb || ${SUDO} dnf install -y xorg-x11-server-Xwayland || true
               ${SUDO} dnf install -y python3-pyside6 || ${SUDO} dnf install -y python3-pyqt6 || true
               if [ "${TARGET_DESKTOP}" = "gnome" ]; then
                 ${SUDO} dnf install -y qgnomeplatform-qt6 qt6-qtwayland xdg-desktop-portal-gtk \

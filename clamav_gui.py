@@ -2242,22 +2242,42 @@ def run_self_test() -> int:
         ping_msg = json.loads(helper_proc.stdout.readline().strip())
         assert ping_msg["id"] == 1 and ping_msg["ok"] is True, f"Unexpected ping: {ping_msg}"
 
-        helper_proc.stdin.write(
-            json.dumps(
-                {
-                    "id": 2,
-                    "action": "inspect_proc",
-                    "params": {"pid": os.getpid(), "log_path": SCRIPT_PATH, "log_offset": 0},
-                }
+        test_log_path = SCRIPT_PATH
+        cleanup_test_log = False
+        if os.geteuid() == 0:
+            # Root helper confines log reads to /var/log/clam*.log; stage an ephemeral log there.
+            if os.path.isdir("/var/log") and os.access("/var/log", os.W_OK):
+                test_log_path = os.path.join("/var/log", f"clamav-selftest-{os.getpid()}.log")
+                with open(test_log_path, "w", encoding="utf-8") as fh:
+                    fh.write("# clamav-security-center self-test\n")
+                cleanup_test_log = True
+            else:
+                test_log_path = ""
+
+        try:
+            helper_proc.stdin.write(
+                json.dumps(
+                    {
+                        "id": 2,
+                        "action": "inspect_proc",
+                        "params": {"pid": os.getpid(), "log_path": test_log_path, "log_offset": 0},
+                    }
+                )
+                + "\n"
             )
-            + "\n"
-        )
-        helper_proc.stdin.flush()
-        insp_msg = json.loads(helper_proc.stdout.readline().strip())
-        assert insp_msg["id"] == 2 and insp_msg["ok"] is True
-        assert insp_msg["result"]["log"]["exists"] is True
-        assert insp_msg["result"]["log"]["file_size"] > 0
-        print("[self-test] Helper JSON protocol passed.")
+            helper_proc.stdin.flush()
+            insp_msg = json.loads(helper_proc.stdout.readline().strip())
+            assert insp_msg["id"] == 2 and insp_msg["ok"] is True, f"Unexpected inspect_proc: {insp_msg}"
+            if test_log_path:
+                assert insp_msg["result"]["log"]["exists"] is True
+                assert insp_msg["result"]["log"]["file_size"] > 0
+            print("[self-test] Helper JSON protocol passed.")
+        finally:
+            if cleanup_test_log:
+                try:
+                    os.unlink(test_log_path)
+                except OSError:
+                    pass
     finally:
         helper_proc.terminate()
         helper_proc.wait(timeout=3)
@@ -2307,18 +2327,28 @@ class HelperClient:
                     except OSError:
                         pass
 
+    def _spawn_auth_process(self, cmd: list[str]) -> tuple[subprocess.Popen[str] | None, str]:
+        """Spawn a privileged auth wrapper process cleanly, handling missing binaries."""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            return proc, ""
+        except OSError as exc:
+            return None, f"Failed to launch {cmd[0]}: {exc}"
+
     def start_with_sudo(self, password: str) -> tuple[bool, str]:
         """Spawn helper using sudo -k -S and validate root readiness."""
         self.close()
         cmd = ["sudo", "-k", "-S", "-p", "", sys.executable, SCRIPT_PATH, "--helper"]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        proc, spawn_err = self._spawn_auth_process(cmd)
+        if proc is None:
+            return False, spawn_err
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
 
         stderr_lines: list[str] = []
@@ -2402,14 +2432,9 @@ class HelperClient:
         """Attempt non-interactive sudo -n helper launch if credentials are cached or NOPASSWD."""
         self.close()
         cmd = ["sudo", "-n", sys.executable, SCRIPT_PATH, "--helper"]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        proc, spawn_err = self._spawn_auth_process(cmd)
+        if proc is None:
+            return False, spawn_err
         assert proc.stdout is not None and proc.stderr is not None
         line = proc.stdout.readline()
         if line.strip().startswith("{"):
@@ -2428,14 +2453,9 @@ class HelperClient:
         """Spawn helper via pkexec (triggers KDE Polkit prompt)."""
         self.close()
         cmd = ["pkexec", sys.executable, SCRIPT_PATH, "--helper"]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        proc, spawn_err = self._spawn_auth_process(cmd)
+        if proc is None:
+            return False, spawn_err
         assert proc.stdout is not None and proc.stderr is not None
 
         while True:
@@ -2725,6 +2745,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QPlainTextEdit,
             QProgressBar,
             QPushButton,
+            QScrollArea,
             QSpinBox,
             QSystemTrayIcon,
             QTableWidget,
@@ -2768,6 +2789,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QPlainTextEdit,
             QProgressBar,
             QPushButton,
+            QScrollArea,
             QSpinBox,
             QSystemTrayIcon,
             QTableWidget,
@@ -3250,6 +3272,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             meta_font = QFont()
             meta_font.setPointSize(9)
             self.meta_lbl.setFont(meta_font)
+            self.meta_lbl.setWordWrap(True)
             self.meta_lbl.setStyleSheet("color: palette(placeholderText);")
             title_box.addWidget(self.app_title_lbl)
             title_box.addWidget(self.meta_lbl)
@@ -3505,35 +3528,35 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             # Main Tabs (hidden until requested)
             self.tabs = QTabWidget()
-            self.tabs.addTab(
-                self._build_log_tab(), _theme_icon("text-x-log", "text-x-generic", "document-properties"), self._tr("tab_log")
+            self.tabs.setUsesScrollButtons(True)
+            self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+            tab_specs = (
+                (self._build_log_tab(), _theme_icon("text-x-log", "text-x-generic", "document-properties"), self._tr("tab_log")),
+                (
+                    self._build_threats_tab(),
+                    _theme_icon("security-low", "security-medium", "dialog-warning"),
+                    self._tr("tab_threats", count=0),
+                ),
+                (
+                    self._build_quarantine_tab(),
+                    _theme_icon("folder-locked", "changes-prevent", "system-lock-screen", "folder"),
+                    self._tr("tab_quarantine", count=0),
+                ),
+                (self._build_history_tab(), _theme_icon("document-open-recent", "document-open"), self._tr("tab_history")),
+                (self._build_schedule_tab(), _theme_icon("appointment-new", "x-office-calendar"), self._tr("tab_schedule")),
+                (
+                    self._build_new_scan_tab(),
+                    _theme_icon("configure", "preferences-system", "applications-system"),
+                    self._tr("tab_custom"),
+                ),
+                (self._build_db_tab(), _theme_icon("view-refresh"), self._tr("tab_db")),
             )
-            self.tabs.addTab(
-                self._build_threats_tab(),
-                _theme_icon("security-low", "security-medium", "dialog-warning"),
-                self._tr("tab_threats", count=0),
-            )
-            self.tabs.addTab(
-                self._build_quarantine_tab(),
-                _theme_icon("folder-locked", "changes-prevent", "system-lock-screen", "folder"),
-                self._tr("tab_quarantine", count=0),
-            )
-            self.tabs.addTab(
-                self._build_history_tab(),
-                _theme_icon("document-open-recent", "document-open"),
-                self._tr("tab_history"),
-            )
-            self.tabs.addTab(
-                self._build_schedule_tab(),
-                _theme_icon("appointment-new", "x-office-calendar"),
-                self._tr("tab_schedule"),
-            )
-            self.tabs.addTab(
-                self._build_new_scan_tab(),
-                _theme_icon("configure", "preferences-system", "applications-system"),
-                self._tr("tab_custom"),
-            )
-            self.tabs.addTab(self._build_db_tab(), _theme_icon("view-refresh"), self._tr("tab_db"))
+            for tab_page, tab_icon, tab_label in tab_specs:
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setWidget(tab_page)
+                self.tabs.addTab(scroll, tab_icon, tab_label)
             self.tabs.setVisible(False)
             root.addWidget(self.tabs, 1)
 
@@ -3828,7 +3851,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             target_row.addWidget(browse_btn)
             form.addRow(self._reg_text(QLabel(), "adv_target_lbl"), target_row)
 
-            opts_grid = QGridLayout()
+            opts_box = QVBoxLayout()
+            opts_box.setSpacing(4)
             self.opt_recursive = self._reg_text(QCheckBox(), "opt_recursive")
             self.opt_recursive.setChecked(True)
             self.opt_infected_only = self._reg_text(QCheckBox(), "opt_infected_only")
@@ -3837,12 +3861,10 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.opt_exclude_virtual.setChecked(True)
             self.opt_cross_fs = self._reg_text(QCheckBox(), "opt_cross_fs")
             self.opt_cross_fs.setChecked(False)
-            for idx, chk in enumerate(
-                (self.opt_recursive, self.opt_infected_only, self.opt_exclude_virtual, self.opt_cross_fs)
-            ):
+            for chk in (self.opt_recursive, self.opt_infected_only, self.opt_exclude_virtual, self.opt_cross_fs):
                 chk.toggled.connect(self._update_command_preview)
-                opts_grid.addWidget(chk, idx // 2, idx % 2)
-            form.addRow(self._reg_text(QLabel(), "adv_options_lbl"), opts_grid)
+                opts_box.addWidget(chk)
+            form.addRow(self._reg_text(QLabel(), "adv_options_lbl"), opts_box)
 
             size_row = QHBoxLayout()
             self.max_size_spin = QSpinBox()
