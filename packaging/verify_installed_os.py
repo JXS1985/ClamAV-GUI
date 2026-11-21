@@ -76,8 +76,8 @@ def verify_start_menu_entry(desktop: str) -> None:
     try:
         from gi.repository import Gio  # type: ignore[import-not-found]
 
-        app_info = Gio.DesktopAppInfo.new("clamav-kde-gui.desktop")
-        assert app_info is not None, "Gio.DesktopAppInfo could not resolve clamav-kde-gui.desktop"
+        app_info = Gio.DesktopAppInfo.new_from_filename(str(INSTALLED_DESKTOP))
+        assert app_info is not None, f"Gio.DesktopAppInfo could not load {INSTALLED_DESKTOP}"
         assert app_info.should_show(), "Gio.DesktopAppInfo.should_show() returned False"
         if desktop == "gnome":
             assert app_info.get_show_in("GNOME"), "Desktop entry not shown in GNOME"

@@ -964,6 +964,76 @@ class TestSecurityHardening(unittest.TestCase):
             self.assertEqual(deps_ok["missing_required"], [])
             self.assertEqual(deps_ok["missing_optional"], [])
 
+    def test_helper_client_timeout_nopass_pkexec_and_verify_os_script(self) -> None:
+        # HelperClient call timeout raises TimeoutError
+        client = app_mod.HelperClient()
+        fake_proc = mock.Mock()
+        fake_proc.poll.return_value = None
+        fake_proc.stdin = mock.Mock()
+        client._proc = fake_proc
+        with self.assertRaises(TimeoutError):
+            client.call("ping", timeout=0.05)
+        client._proc = None
+
+        # start_with_sudo_nopass success & fail
+        nopw_ok = mock.Mock()
+        nopw_ok.poll.return_value = None
+        nopw_ok.stdout = mock.Mock()
+        nopw_ok.stdout.__iter__ = mock.Mock(return_value=iter([]))
+        nopw_ok.stdout.readline.return_value = '{"type": "ready", "uid": 0}\n'
+        nopw_ok.stderr = mock.Mock()
+        with mock.patch("subprocess.Popen", return_value=nopw_ok):
+            ok, msg = client.start_with_sudo_nopass()
+        self.assertTrue(ok)
+        self.assertIn("cached", msg)
+        client._proc = None
+
+        # _helper_get_schedule reading existing timer file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmr = Path(tmpdir) / "clamav.timer"
+            tmr.write_text('# CLAMAV_GUI_CONFIG={"frequency":"daily","day_of_week":"Mon","time_of_day":"01:15","scan_type":"full"}\n', encoding="utf-8")
+            orig_tmr = app_mod.SYSTEMD_TIMER_PATH
+            try:
+                app_mod.SYSTEMD_TIMER_PATH = str(tmr)
+                with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stdout="disabled", stderr="")):
+                    sched = app_mod._helper_get_schedule({})
+                self.assertEqual(sched["frequency"], "daily")
+                self.assertEqual(sched["scan_type"], "full")
+                self.assertFalse(sched["enabled"])
+            finally:
+                app_mod.SYSTEMD_TIMER_PATH = orig_tmr
+
+        # packaging/verify_installed_os.py checks on temporary staged files
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "packaging"))
+        import verify_installed_os as vos  # type: ignore[import-not-found]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            fake_bin = root / "clamav-security-center"
+            fake_bin.write_text("#!/bin/sh\necho '[self-test] ALL CHECKS PASSED.'\n", encoding="utf-8")
+            fake_bin.chmod(0o755)
+            fake_alias = root / "clamav-kde-gui"
+            fake_alias.symlink_to(fake_bin)
+            fake_run = root / "run.sh"
+            fake_run.write_text("#!/bin/sh\n", encoding="utf-8")
+            fake_run.chmod(0o755)
+            fake_desk = root / "clamav-kde-gui.desktop"
+            fake_desk.write_text(
+                f"[Desktop Entry]\nType=Application\nName=ClamAV Security Center\nName[de]=ClamAV Sicherheitszentrum\n"
+                f"Exec={fake_bin}\nIcon=security-high\nCategories=System;Security;Qt;KDE;GNOME;\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(vos, "INSTALLED_BIN", fake_bin),
+                mock.patch.object(vos, "INSTALLED_ALIAS", fake_alias),
+                mock.patch.object(vos, "INSTALLED_PY", Path(app_mod.SCRIPT_PATH)),
+                mock.patch.object(vos, "INSTALLED_RUN", fake_run),
+                mock.patch.object(vos, "INSTALLED_DESKTOP", fake_desk),
+                mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="pkg-1.0", stderr="")),
+            ):
+                vos.verify_package_files("rpm")
+                vos.verify_start_menu_entry("gnome")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -314,6 +314,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "freshclam_missing_tip": "Disabled because 'freshclam' is not installed on this system.",
         "installed_word": "Installed",
         "missing_word": "Missing",
+        "tile_quick_title": "Quick Scan",
+        "tile_quick_sub": "Downloads & Home • ~2 min",
+        "tile_full_title": "Full System Scan",
+        "tile_full_sub": "Entire PC",
+        "tile_pick_title": "Check File or Folder",
+        "tile_pick_sub": "Drag & drop items here",
+        "also_missing_suffix": " (also missing: {items})",
+        "history_system_log": "System / Log Scan",
+        "svc_active": "Active",
+        "svc_inactive": "Inactive",
+        "log_path_tip": "Scan logs managed by the root helper must reside under /var/log/ (e.g. /var/log/clamav-scan.log).",
+        "log_inspect_err": "Log read notice: {err}",
+        "polkit_source_hint": "Note: Passwordless Polkit auto-unlock activates automatically once installed as a system package.",
+        "unknown_word": "Unknown",
     },
     "de": {
         "window_title": "ClamAV Sicherheitszentrum",
@@ -568,6 +582,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "freshclam_missing_tip": "Deaktiviert, da ‚freshclam‘ auf diesem System nicht installiert ist.",
         "installed_word": "Installiert",
         "missing_word": "Fehlt",
+        "tile_quick_title": "Schnellscan",
+        "tile_quick_sub": "Downloads & Home • ~2 Min.",
+        "tile_full_title": "Vollständiger Systemscan",
+        "tile_full_sub": "Gesamter PC",
+        "tile_pick_title": "Ordner oder Datei scannen",
+        "tile_pick_sub": "Hierher ziehen oder wählen",
+        "also_missing_suffix": " (außerdem fehlt: {items})",
+        "history_system_log": "System- / Protokollscan",
+        "svc_active": "Aktiv",
+        "svc_inactive": "Inaktiv",
+        "log_path_tip": "Scan-Protokolle des Root-Helpers müssen unter /var/log/ liegen (z. B. /var/log/clamav-scan.log).",
+        "log_inspect_err": "Protokoll-Hinweis: {err}",
+        "polkit_source_hint": "Hinweis: Passwortloses Polkit-Freischalten wird nach Installation als Systempaket automatisch aktiv.",
+        "unknown_word": "Unbekannt",
     },
 }
 
@@ -2664,8 +2692,19 @@ def build_reveal_file_command(path: str, desktop: str | None = None) -> list[str
 def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
     """Create and return the Qt6 ClamAVMainWindow (PySide6 with PyQt6 fallback)."""
     try:
-        from PySide6.QtCore import Qt, QTime, QTimer, Signal, QObject
-        from PySide6.QtGui import QAction, QFont, QIcon, QTextCursor
+        from PySide6.QtCore import Qt, QTime, QTimer, Signal, QObject, QRectF
+        from PySide6.QtGui import (
+            QAction,
+            QBrush,
+            QColor,
+            QFont,
+            QIcon,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPixmap,
+            QTextCursor,
+        )
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -2696,8 +2735,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QWidget,
         )
     except ImportError:
-        from PyQt6.QtCore import Qt, QTime, QTimer, pyqtSignal as Signal, QObject
-        from PyQt6.QtGui import QAction, QFont, QIcon, QTextCursor
+        from PyQt6.QtCore import Qt, QTime, QTimer, pyqtSignal as Signal, QObject, QRectF
+        from PyQt6.QtGui import (
+            QAction,
+            QBrush,
+            QColor,
+            QFont,
+            QIcon,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPixmap,
+            QTextCursor,
+        )
         from PyQt6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -2743,36 +2793,166 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         inspect_done = Signal(object, str)
         freshclam_done = Signal(bool, str)
 
+    def _draw_shield_pixmap(size: int, bg_hex: str, symbol: str = "check") -> QPixmap:
+        """Render a crisp high-DPI vector shield badge without relying on desktop icon sets."""
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w = float(size)
+        path = QPainterPath()
+        path.moveTo(w * 0.50, w * 0.08)
+        path.lineTo(w * 0.86, w * 0.22)
+        path.quadTo(w * 0.88, w * 0.64, w * 0.50, w * 0.92)
+        path.quadTo(w * 0.12, w * 0.64, w * 0.14, w * 0.22)
+        path.closeSubpath()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(bg_hex)))
+        painter.drawPath(path)
+
+        pen = QPen(QColor("#ffffff"))
+        pen.setWidthF(max(2.0, w * 0.085))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if symbol == "check":
+            chk = QPainterPath()
+            chk.moveTo(w * 0.33, w * 0.50)
+            chk.lineTo(w * 0.45, w * 0.63)
+            chk.lineTo(w * 0.68, w * 0.38)
+            painter.drawPath(chk)
+        elif symbol == "alert":
+            painter.drawLine(int(w * 0.50), int(w * 0.32), int(w * 0.50), int(w * 0.55))
+            painter.drawPoint(int(w * 0.50), int(w * 0.68))
+        elif symbol == "scan":
+            painter.drawEllipse(QRectF(w * 0.33, w * 0.33, w * 0.34, w * 0.34))
+            painter.drawPoint(int(w * 0.50), int(w * 0.50))
+        else:
+            painter.drawLine(int(w * 0.50), int(w * 0.33), int(w * 0.50), int(w * 0.63))
+            painter.drawLine(int(w * 0.38), int(w * 0.52), int(w * 0.50), int(w * 0.64))
+            painter.drawLine(int(w * 0.62), int(w * 0.52), int(w * 0.50), int(w * 0.64))
+        painter.end()
+        return pm
+
+    def _draw_tile_pixmap(kind: str, size: int = 40) -> QPixmap:
+        """Render clean vector tile icons for Quick Scan, Full System Scan, and Picker."""
+        if kind == "quick":
+            return _draw_shield_pixmap(size, "#1e9b64", "check")
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w = float(size)
+        if kind == "full":
+            p.setPen(QPen(QColor("#526b84"), 2.2))
+            p.setBrush(QBrush(QColor("#e2e8f0")))
+            p.drawRoundedRect(QRectF(w * 0.10, w * 0.18, w * 0.68, w * 0.48), 4.0, 4.0)
+            p.drawLine(int(w * 0.34), int(w * 0.68), int(w * 0.34), int(w * 0.80))
+            p.drawLine(int(w * 0.24), int(w * 0.80), int(w * 0.56), int(w * 0.80))
+            p.setBrush(QBrush(QColor("#64748b")))
+            p.drawRoundedRect(QRectF(w * 0.60, w * 0.36, w * 0.30, w * 0.44), 4.0, 4.0)
+        else:
+            pen = QPen(QColor("#6b63b5"), 2.0, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(QBrush(QColor(107, 99, 181, 32)))
+            p.drawRoundedRect(QRectF(w * 0.14, w * 0.20, w * 0.66, w * 0.54), 5.0, 5.0)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#5b5fc7")))
+            p.drawEllipse(QRectF(w * 0.58, w * 0.52, w * 0.32, w * 0.32))
+            chk_pen = QPen(QColor("#ffffff"), 2.0)
+            chk_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(chk_pen)
+            p.drawLine(int(w * 0.68), int(w * 0.68), int(w * 0.73), int(w * 0.74))
+            p.drawLine(int(w * 0.73), int(w * 0.74), int(w * 0.82), int(w * 0.62))
+        p.end()
+        return pm
+
+    class ScanTileButton(QPushButton):
+        """Card-style scan tile with large vector icon, bold title, and muted subtitle."""
+
+        def __init__(self, kind: str, title: str, subtitle: str) -> None:
+            super().__init__()
+            self._title = title
+            self.setObjectName("ScanTile")
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setMinimumHeight(112)
+            self.setStyleSheet(
+                "#ScanTile { background-color: palette(base); border: 1px solid palette(mid); "
+                "border-radius: 12px; padding: 12px 14px; text-align: center; } "
+                "#ScanTile:hover { border: 1px solid palette(highlight); background-color: palette(alternateBase); } "
+                "#ScanTile:disabled { opacity: 0.55; }"
+            )
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(10, 12, 10, 12)
+            lay.setSpacing(5)
+            lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.icon_lbl = QLabel()
+            self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.icon_lbl.setPixmap(_draw_tile_pixmap(kind, 42))
+            self.icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            self.title_lbl = QLabel(title)
+            tf = QFont()
+            tf.setPointSize(11)
+            tf.setBold(True)
+            self.title_lbl.setFont(tf)
+            self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            self.sub_lbl = QLabel(subtitle)
+            sf = QFont()
+            sf.setPointSize(8)
+            self.sub_lbl.setFont(sf)
+            self.sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.sub_lbl.setStyleSheet("color: palette(placeholderText);")
+            self.sub_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+            lay.addWidget(self.icon_lbl)
+            lay.addWidget(self.title_lbl)
+            lay.addWidget(self.sub_lbl)
+
+        def text(self) -> str:
+            return self._title
+
+        def setText(self, text: str) -> None:
+            self._title = text
+            self.title_lbl.setText(text)
+
+        def setSubtitle(self, subtitle: str) -> None:
+            self.sub_lbl.setText(subtitle)
+
     class StatCard(QFrame):
-        """Compact Breeze-friendly metric card."""
+        """Compact Breeze/Adwaita metric column inside the unified status strip."""
 
         def __init__(self, title: str, initial_value: str = "-", subtitle: str = "") -> None:
             super().__init__()
-            self.setFrameShape(QFrame.Shape.StyledPanel)
             self.setObjectName("StatCard")
-            self.setStyleSheet(
-                "#StatCard { border: 1px solid palette(mid); border-radius: 8px; padding: 6px; }"
-            )
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 8, 12, 8)
             layout.setSpacing(2)
+            layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self.title_lbl = QLabel(title)
             title_font = QFont()
             title_font.setPointSize(9)
             self.title_lbl.setFont(title_font)
+            self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.title_lbl.setStyleSheet("color: palette(placeholderText);")
 
             self.value_lbl = QLabel(initial_value)
             val_font = QFont()
-            val_font.setPointSize(14)
+            val_font.setPointSize(12)
             val_font.setBold(True)
             self.value_lbl.setFont(val_font)
+            self.value_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self.sub_lbl = QLabel(subtitle)
             sub_font = QFont()
             sub_font.setPointSize(8)
             self.sub_lbl.setFont(sub_font)
+            self.sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.sub_lbl.setStyleSheet("color: palette(placeholderText);")
 
             layout.addWidget(self.title_lbl)
@@ -2869,6 +3049,30 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._tr_ph.append((widget, key))
             widget.setPlaceholderText(self._tr(key))
             return widget
+
+        def _select_lang_code(self, code: str) -> None:
+            idx = self.lang_combo.findData(code)
+            if idx >= 0:
+                self.lang_combo.setCurrentIndex(idx)
+
+        def _sync_lang_pills(self) -> None:
+            if not hasattr(self, "lang_de_btn"):
+                return
+            for btn, code in ((self.lang_de_btn, "de"), (self.lang_en_btn, "en")):
+                active = self.lang == code
+                btn.blockSignals(True)
+                btn.setChecked(active)
+                btn.blockSignals(False)
+                if active:
+                    btn.setStyleSheet(
+                        "QPushButton { background-color: palette(base); font-weight: bold; "
+                        "border: 1px solid palette(mid); border-radius: 10px; padding: 3px 10px; }"
+                    )
+                else:
+                    btn.setStyleSheet(
+                        "QPushButton { background: transparent; border: none; "
+                        "color: palette(placeholderText); border-radius: 10px; padding: 3px 10px; }"
+                    )
 
         def _on_language_changed(self, idx: int) -> None:
             new_lang = str(self.lang_combo.itemData(idx) or "en")
@@ -3025,16 +3229,27 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             root.setContentsMargins(14, 12, 14, 12)
             root.setSpacing(10)
 
-            # Header bar
+            # Header bar (mockup_1: shield icon + title/meta on left; badge + EN/DE pill + quit on right)
             header_row = QHBoxLayout()
+            header_row.setSpacing(12)
+
+            self.header_shield_lbl = QLabel()
+            self.header_shield_lbl.setFixedSize(36, 36)
+            self.header_shield_lbl.setPixmap(_draw_shield_pixmap(36, "#1f8a5b", "check"))
+            header_row.addWidget(self.header_shield_lbl)
+
             title_box = QVBoxLayout()
+            title_box.setSpacing(1)
             self.app_title_lbl = self._reg_text(QLabel(), "app_title")
             title_font = QFont()
-            title_font.setPointSize(16)
+            title_font.setPointSize(15)
             title_font.setBold(True)
             self.app_title_lbl.setFont(title_font)
 
             self.meta_lbl = QLabel(self._tr("detecting_clamav"))
+            meta_font = QFont()
+            meta_font.setPointSize(9)
+            self.meta_lbl.setFont(meta_font)
             self.meta_lbl.setStyleSheet("color: palette(placeholderText);")
             title_box.addWidget(self.app_title_lbl)
             title_box.addWidget(self.meta_lbl)
@@ -3042,14 +3257,15 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             self.root_badge_lbl = self._reg_text(QLabel(), "root_active_badge")
             self.root_badge_lbl.setStyleSheet(
-                "color: #1f7a3f; font-weight: bold; padding: 4px 10px; "
-                "border: 1px solid #1f7a3f; border-radius: 12px;"
+                "color: #15803d; font-weight: bold; padding: 4px 12px; "
+                "background-color: rgba(31, 138, 91, 0.14); "
+                "border: 1px solid rgba(31, 138, 91, 0.35); border-radius: 12px;"
             )
             self.root_badge_lbl.setVisible(False)
             header_row.addWidget(self.root_badge_lbl)
 
             self.lang_lbl = self._reg_text(QLabel(), "lang_label")
-            header_row.addWidget(self.lang_lbl)
+            self.lang_lbl.setVisible(False)
 
             self.lang_combo = QComboBox()
             self.lang_combo.addItem("Deutsch", "de")
@@ -3058,10 +3274,33 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if idx_lang >= 0:
                 self.lang_combo.setCurrentIndex(idx_lang)
             self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
-            header_row.addWidget(self.lang_combo)
+            self.lang_combo.setVisible(False)
+
+            lang_pill = QFrame()
+            lang_pill.setObjectName("LangPill")
+            lang_pill.setStyleSheet(
+                "#LangPill { background-color: palette(alternateBase); border: 1px solid palette(mid); "
+                "border-radius: 12px; padding: 2px; }"
+            )
+            pill_lay = QHBoxLayout(lang_pill)
+            pill_lay.setContentsMargins(2, 2, 2, 2)
+            pill_lay.setSpacing(2)
+            self.lang_en_btn = QPushButton("EN")
+            self.lang_en_btn.setCheckable(True)
+            self.lang_en_btn.clicked.connect(lambda: self._select_lang_code("en"))
+            self.lang_de_btn = QPushButton("DE")
+            self.lang_de_btn.setCheckable(True)
+            self.lang_de_btn.clicked.connect(lambda: self._select_lang_code("de"))
+            pill_lay.addWidget(self.lang_en_btn)
+            pill_lay.addWidget(self.lang_de_btn)
+            self._sync_lang_pills()
+            header_row.addWidget(lang_pill)
 
             self.quit_btn = self._reg_text(QPushButton(), "quit_btn")
             self.quit_btn.setIcon(QIcon.fromTheme("application-exit"))
+            self.quit_btn.setStyleSheet(
+                "QPushButton { border: 1px solid palette(mid); border-radius: 10px; padding: 4px 10px; }"
+            )
             self.quit_btn.clicked.connect(self._quit_app)
             header_row.addWidget(self.quit_btn)
             root.addLayout(header_row)
@@ -3071,9 +3310,10 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.auth_banner.setObjectName("AuthBanner")
             self.auth_banner.setFrameShape(QFrame.Shape.StyledPanel)
             auth_layout = QHBoxLayout(self.auth_banner)
-            auth_layout.setContentsMargins(12, 8, 12, 8)
+            auth_layout.setContentsMargins(14, 10, 14, 10)
 
             self.auth_lbl = self._reg_text(QLabel(), "auth_banner_text")
+            self._reg_tip(self.auth_lbl, "polkit_source_hint")
             self.auth_lbl.setWordWrap(True)
             auth_layout.addWidget(self.auth_lbl, 1)
 
@@ -3090,18 +3330,25 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             auth_layout.addWidget(self.pkexec_btn)
             root.addWidget(self.auth_banner)
 
-            # Plain-English Hero Status Banner
+            # Plain-English Hero Status Banner (mockup_1: 46x46 vector shield + clean copy + CTA)
             self.hero_banner = QFrame()
             self.hero_banner.setObjectName("HeroBanner")
             self.hero_banner.setFrameShape(QFrame.Shape.StyledPanel)
             hero_outer = QHBoxLayout(self.hero_banner)
-            hero_outer.setContentsMargins(14, 10, 14, 10)
+            hero_outer.setContentsMargins(18, 14, 18, 14)
+            hero_outer.setSpacing(14)
+
+            self.hero_icon_lbl = QLabel()
+            self.hero_icon_lbl.setFixedSize(46, 46)
+            self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#1f8a5b", "check"))
+            hero_outer.addWidget(self.hero_icon_lbl)
+
             hero_layout = QVBoxLayout()
             hero_layout.setSpacing(2)
 
             self.hero_title_lbl = QLabel(self._tr("hero_protected_title"))
             hero_font = QFont()
-            hero_font.setPointSize(13)
+            hero_font.setPointSize(14)
             hero_font.setBold(True)
             self.hero_title_lbl.setFont(hero_font)
 
@@ -3124,49 +3371,67 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             hero_outer.addWidget(self.hero_db_btn)
             root.addWidget(self.hero_banner)
 
-            # One-Click Quick Action Row
+            # One-Click Quick Action Tiles (mockup_1: 3 equal elevated tiles)
             quick_row = QHBoxLayout()
-            quick_row.setSpacing(10)
+            quick_row.setSpacing(14)
 
-            self.btn_quick_scan = self._reg_text(QPushButton(), "btn_quick_scan")
-            self.btn_quick_scan.setIcon(QIcon.fromTheme("edit-find"))
-            self.btn_quick_scan.setMinimumHeight(36)
+            self.btn_quick_scan = self._reg_text(
+                ScanTileButton("quick", self._tr("tile_quick_title"), self._tr("tile_quick_sub")),
+                "tile_quick_title",
+            )
             self.btn_quick_scan.clicked.connect(self._start_quick_scan)
-            quick_row.addWidget(self.btn_quick_scan)
+            quick_row.addWidget(self.btn_quick_scan, 1)
 
-            self.btn_full_scan = self._reg_text(QPushButton(), "btn_full_scan")
-            self.btn_full_scan.setIcon(QIcon.fromTheme("drive-harddisk"))
-            self.btn_full_scan.setMinimumHeight(36)
+            self.btn_full_scan = self._reg_text(
+                ScanTileButton("full", self._tr("tile_full_title"), self._tr("tile_full_sub")),
+                "tile_full_title",
+            )
             self.btn_full_scan.clicked.connect(self._start_full_scan)
-            quick_row.addWidget(self.btn_full_scan)
+            quick_row.addWidget(self.btn_full_scan, 1)
 
-            self.btn_pick_scan = self._reg_text(QPushButton(), "btn_pick_scan")
-            self.btn_pick_scan.setIcon(QIcon.fromTheme("folder-open"))
-            self.btn_pick_scan.setMinimumHeight(36)
+            self.btn_pick_scan = self._reg_text(
+                ScanTileButton("pick", self._tr("tile_pick_title"), self._tr("tile_pick_sub")),
+                "tile_pick_title",
+            )
             self.btn_pick_scan.clicked.connect(self._start_custom_picker_scan)
-            quick_row.addWidget(self.btn_pick_scan)
+            quick_row.addWidget(self.btn_pick_scan, 1)
 
             self.drop_hint_lbl = self._reg_text(QLabel(), "drop_hint")
-            self.drop_hint_lbl.setStyleSheet("color: palette(placeholderText);")
-            quick_row.addStretch(1)
-            quick_row.addWidget(self.drop_hint_lbl)
+            self.drop_hint_lbl.setVisible(False)
             root.addLayout(quick_row)
 
-            # Status Cards Row
-            cards_layout = QHBoxLayout()
-            cards_layout.setSpacing(10)
+            # Unified 4-Column Status Summary Strip (mockup_1)
+            self.stats_strip = QFrame()
+            self.stats_strip.setObjectName("StatsStrip")
+            self.stats_strip.setStyleSheet(
+                "#StatsStrip { background-color: palette(base); border: 1px solid palette(mid); "
+                "border-radius: 12px; }"
+            )
+            cards_layout = QHBoxLayout(self.stats_strip)
+            cards_layout.setContentsMargins(6, 6, 6, 6)
+            cards_layout.setSpacing(0)
             self.card_status = StatCard(
                 self._tr("card_status_title"), self._tr("state_idle"), self._tr("ready_to_scan")
             )
             self.card_cpu = StatCard(self._tr("card_cpu_title"), "00:00:00", self._tr("waiting"))
             self.card_io = StatCard(self._tr("card_io_title"), "-", self._tr("idle_word"))
             self.card_threats = StatCard(self._tr("card_threats_title"), "0", self._tr("clean_so_far"))
-            for card in (self.card_status, self.card_cpu, self.card_io, self.card_threats):
+            stat_list = (self.card_status, self.card_cpu, self.card_io, self.card_threats)
+            for idx_c, card in enumerate(stat_list):
                 cards_layout.addWidget(card, 1)
-            root.addLayout(cards_layout)
+                if idx_c < len(stat_list) - 1:
+                    sep = QFrame()
+                    sep.setFrameShape(QFrame.Shape.VLine)
+                    sep.setStyleSheet("color: palette(mid); margin: 8px 0px;")
+                    cards_layout.addWidget(sep)
+            root.addWidget(self.stats_strip)
 
             # Currently Scanning Box + Control Bar
             self.ctrl_box = self._reg_title(QGroupBox(), "ctrl_box_title")
+            self.ctrl_box.setStyleSheet(
+                "QGroupBox { border: 1px solid palette(mid); border-radius: 12px; margin-top: 8px; padding-top: 10px; } "
+                "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }"
+            )
             ctrl_layout = QVBoxLayout(self.ctrl_box)
             ctrl_layout.setSpacing(8)
 
@@ -3221,12 +3486,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             ctrl_layout.addLayout(btn_row)
             root.addWidget(self.ctrl_box)
 
-            # Toggle button for bottom detail tabs (hidden by default)
+            # Toggle button for bottom detail tabs (centered subtle footer link, mockup_1)
             tabs_toggle_row = QHBoxLayout()
             self.toggle_tabs_btn = QPushButton(self._tr("show_tabs_btn"))
             self.toggle_tabs_btn.setCheckable(True)
             self.toggle_tabs_btn.setChecked(False)
+            self.toggle_tabs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.toggle_tabs_btn.setStyleSheet(
+                "QPushButton { border: none; background: transparent; color: palette(placeholderText); "
+                "padding: 4px 10px; font-weight: 500; } "
+                "QPushButton:hover { color: palette(text); }"
+            )
             self.toggle_tabs_btn.clicked.connect(self._on_toggle_tabs_panel)
+            tabs_toggle_row.addStretch(1)
             tabs_toggle_row.addWidget(self.toggle_tabs_btn)
             tabs_toggle_row.addStretch(1)
             root.addLayout(tabs_toggle_row)
@@ -3299,7 +3571,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             top_bar = QHBoxLayout()
             top_bar.addWidget(self._reg_text(QLabel(), "log_path_lbl"))
-            self.log_path_edit = QLineEdit(DEFAULT_LOG_PATH)
+            self.log_path_edit = self._reg_tip(QLineEdit(DEFAULT_LOG_PATH), "log_path_tip")
             top_bar.addWidget(self.log_path_edit, 1)
 
             reload_btn = self._reg_text(QPushButton(), "reload_log_btn")
@@ -3589,7 +3861,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.infected_action_combo.currentIndexChanged.connect(self._update_command_preview)
             form.addRow(self._reg_text(QLabel(), "adv_action_lbl"), self.infected_action_combo)
 
-            self.new_log_edit = QLineEdit(DEFAULT_LOG_PATH)
+            self.new_log_edit = self._reg_tip(QLineEdit(DEFAULT_LOG_PATH), "log_path_tip")
             self.new_log_edit.textChanged.connect(self._update_command_preview)
             form.addRow(self._reg_text(QLabel(), "adv_log_lbl"), self.new_log_edit)
 
@@ -3707,6 +3979,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             else:
                 self._refresh_schedule()
 
+            self.btn_quick_scan.setSubtitle(self._tr("tile_quick_sub"))
+            self.btn_full_scan.setSubtitle(self._tr("tile_full_sub"))
+            self.btn_pick_scan.setSubtitle(self._tr("tile_pick_sub"))
+            self._sync_lang_pills()
+
             self._refresh_metadata()
             self._update_auth_banner()
             self._update_controls_enabled()
@@ -3754,12 +4031,25 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 warn_parts.append(", ".join(missing_opt) + " " + self._tr("missing_word"))
             warn_str = ("   |   " + "; ".join(warn_parts)) if warn_parts else ""
 
+            raw_svc = str(meta.get("freshclam_service", "inactive"))
+            svc_disp = (
+                self._tr("svc_active")
+                if raw_svc == "active"
+                else (self._tr("svc_inactive") if raw_svc == "inactive" else raw_svc)
+            )
+            if not has_clamscan:
+                self.header_shield_lbl.setPixmap(_draw_shield_pixmap(36, "#b91c1c", "alert"))
+            elif not has_db:
+                self.header_shield_lbl.setPixmap(_draw_shield_pixmap(36, "#b45309", "alert"))
+            else:
+                self.header_shield_lbl.setPixmap(_draw_shield_pixmap(36, "#1f8a5b", "check"))
+
             self.meta_lbl.setText(
                 self._tr(
                     "meta_line_full",
                     version=meta.get("version", "Unavailable"),
                     db_state=db_state,
-                    service=meta.get("freshclam_service", "inactive"),
+                    service=svc_disp,
                     warn=warn_str,
                 )
             )
@@ -3770,7 +4060,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     freshclam_bin=fc_state,
                     db_dir=db_dir,
                     db_state=db_state,
-                    service=meta.get("freshclam_service", "inactive"),
+                    service=svc_disp,
                     deps_note=deps_note,
                 )
             )
@@ -3800,9 +4090,10 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.hero_db_btn.setVisible(False)
             if threats > 0:
                 self.hero_banner.setStyleSheet(
-                    "#HeroBanner { border: 1px solid #b91c1c; border-radius: 8px; "
-                    "background-color: rgba(185, 28, 28, 0.14); }"
+                    "#HeroBanner { border: 1px solid #b91c1c; border-radius: 12px; "
+                    "background-color: rgba(185, 28, 28, 0.10); }"
                 )
+                self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#b91c1c", "alert"))
                 self.hero_title_lbl.setText(self._tr("hero_threats_title", count=threats))
                 self.hero_sub_lbl.setText(self._tr("hero_threats_sub"))
                 return
@@ -3811,19 +4102,23 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 meta = self._last_meta
                 if meta and not meta.get("has_clamscan", True):
                     self.hero_banner.setStyleSheet(
-                        "#HeroBanner { border: 1px solid #b91c1c; border-radius: 8px; "
-                        "background-color: rgba(185, 28, 28, 0.14); }"
+                        "#HeroBanner { border: 1px solid #b91c1c; border-radius: 12px; "
+                        "background-color: rgba(185, 28, 28, 0.10); }"
                     )
+                    self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#b91c1c", "alert"))
                     missing_req = [p for p in meta.get("missing_required", []) if p != "clamscan"]
-                    extra = f" (also missing: {', '.join(missing_req)})" if missing_req else ""
+                    extra = (
+                        self._tr("also_missing_suffix", items=", ".join(missing_req)) if missing_req else ""
+                    )
                     self.hero_title_lbl.setText(self._tr("hero_missing_clamscan_title"))
                     self.hero_sub_lbl.setText(self._tr("hero_missing_clamscan_sub", extra=extra))
                     return
                 if meta and not meta.get("has_virus_db", True):
                     self.hero_banner.setStyleSheet(
-                        "#HeroBanner { border: 1px solid #b45309; border-radius: 8px; "
-                        "background-color: rgba(180, 83, 9, 0.14); }"
+                        "#HeroBanner { border: 1px solid #b45309; border-radius: 12px; "
+                        "background-color: rgba(180, 83, 9, 0.10); }"
                     )
+                    self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#b45309", "download"))
                     self.hero_title_lbl.setText(self._tr("hero_missing_db_title"))
                     self.hero_sub_lbl.setText(
                         self._tr("hero_missing_db_sub", db_dir=meta.get("db_dir", "/var/lib/clamav"))
@@ -3832,24 +4127,27 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     return
 
                 self.hero_banner.setStyleSheet(
-                    "#HeroBanner { border: 1px solid #1f7a3f; border-radius: 8px; "
-                    "background-color: rgba(31, 122, 63, 0.14); }"
+                    "#HeroBanner { border: 1px solid rgba(31, 138, 91, 0.45); border-radius: 12px; "
+                    "background-color: rgba(31, 138, 91, 0.10); }"
                 )
+                self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#1f8a5b", "check"))
                 self.hero_title_lbl.setText(self._tr("hero_protected_title"))
                 self.hero_sub_lbl.setText(self._tr("hero_protected_sub"))
             elif proc.get("state") == "T":
                 self.hero_banner.setStyleSheet(
-                    "#HeroBanner { border: 1px solid #b45309; border-radius: 8px; "
-                    "background-color: rgba(180, 83, 9, 0.14); }"
+                    "#HeroBanner { border: 1px solid #b45309; border-radius: 12px; "
+                    "background-color: rgba(180, 83, 9, 0.10); }"
                 )
+                self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#b45309", "alert"))
                 pct_txt = f" ({self._last_pct:.1f}%)" if self.helper.is_connected else ""
                 self.hero_title_lbl.setText(self._tr("hero_paused_title", pct=pct_txt))
                 self.hero_sub_lbl.setText(self._tr("hero_paused_sub"))
             else:
                 self.hero_banner.setStyleSheet(
-                    "#HeroBanner { border: 1px solid #0369a1; border-radius: 8px; "
-                    "background-color: rgba(3, 105, 161, 0.14); }"
+                    "#HeroBanner { border: 1px solid #0369a1; border-radius: 12px; "
+                    "background-color: rgba(3, 105, 161, 0.10); }"
                 )
+                self.hero_icon_lbl.setPixmap(_draw_shield_pixmap(46, "#0369a1", "scan"))
                 if self.helper.is_connected:
                     self.hero_title_lbl.setText(self._tr("hero_scanning_title", pct=self._last_pct))
                     cur_file = self.current_file_edit.text().strip()
@@ -4358,8 +4656,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
         def _on_inspect_done(self, result: Any, error: str) -> None:
             self._inspect_inflight = False
-            if error or not isinstance(result, dict):
+            if error:
+                self.log_hint_lbl.setText(self._tr("log_inspect_err", err=error))
                 return
+            if not isinstance(result, dict):
+                return
+            if not (self._current_proc and self._current_proc.get("quiet_infected_only")):
+                self.log_hint_lbl.setText("")
 
             if isinstance(result.get("precount"), dict) and result["precount"]:
                 self.telemetry.last_precount = result["precount"]
@@ -4823,8 +5126,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 scanned_disp = self._tr("history_see_log") if scanned_raw == "See log summary" else scanned_raw
                 status_disp = self._tr("status_threats_found") if threats_n > 0 else self._tr("status_clean")
 
+                target_raw = str(item.get("target", ""))
+                target_disp = (
+                    self._tr("history_system_log") if target_raw == "System / Log Scan" else target_raw
+                )
                 self.history_table.setItem(row, 0, QTableWidgetItem(str(item.get("date", ""))))
-                self.history_table.setItem(row, 1, QTableWidgetItem(str(item.get("target", ""))))
+                self.history_table.setItem(row, 1, QTableWidgetItem(target_disp))
                 self.history_table.setItem(row, 2, QTableWidgetItem(str(item.get("duration", ""))))
                 self.history_table.setItem(row, 3, QTableWidgetItem(scanned_disp))
                 self.history_table.setItem(row, 4, QTableWidgetItem(str(threats_n)))
@@ -5046,6 +5353,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.freshclam_btn.setText(self._tr("freshclam_btn"))
             status_line = self._tr("freshclam_success" if ok else "freshclam_errors")
             self.freshclam_output.setPlainText(f"[{status_line}]\n{output}")
+            self.btn_quick_scan.setSubtitle(self._tr("tile_quick_sub"))
+            self.btn_full_scan.setSubtitle(self._tr("tile_full_sub"))
+            self.btn_pick_scan.setSubtitle(self._tr("tile_pick_sub"))
+            self._sync_lang_pills()
+
             self._refresh_metadata()
 
     app = QApplication.instance()

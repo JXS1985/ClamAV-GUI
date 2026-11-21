@@ -182,8 +182,8 @@ build_rpm() {
       recommends_block=""
       ;;
     opensuse)
-      requires_block=$'Requires:       python3 >= 3.10\nRequires:       clamav\nRequires:       findutils\nRequires:       procps\nRequires:       polkit\nRequires:       libnotify-tools'
-      recommends_block=$'Recommends:     (python3-pyside6 or python3-qt6 or python3-pyqt6)'
+      requires_block=$'Requires:       python3 >= 3.10\nRequires:       clamav\nRequires:       findutils\nRequires:       procps\nRequires:       polkit\nRequires:       libnotify-tools\nRequires:       (python3-pyside6 or python3-qt6 or python3-pyqt6)'
+      recommends_block=""
       ;;
     *)
       echo "Error: unsupported --rpm-flavor '${RPM_FLAVOR}'" >&2

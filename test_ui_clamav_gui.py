@@ -128,7 +128,12 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(self.win.tabs.tabText(6), "Virus Database")
 
         self.assertIn("ClamAV 1.4.6-test", self.win.meta_lbl.text())
-        self.assertIn("active", self.win.meta_lbl.text())
+        self.assertIn("Active", self.win.meta_lbl.text())
+        self.assertTrue(hasattr(self.win, "stats_strip"))
+        self.assertTrue(hasattr(self.win, "header_shield_lbl"))
+        self.assertTrue(hasattr(self.win, "hero_icon_lbl"))
+        self.assertTrue(hasattr(self.win, "lang_de_btn"))
+        self.assertTrue(hasattr(self.win, "lang_en_btn"))
 
         initial_w = self.win.width()
         initial_h = self.win.height()
@@ -1043,6 +1048,57 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
             self.win._refresh_metadata()
         self.assertEqual(self.win.hero_title_lbl.text(), "System Protected — No Active Threats Detected")
         self.assertTrue(self.win.hero_db_btn.isHidden())
+
+    def test_mockup_lang_pills_tiles_inspect_error_and_german_history(self) -> None:
+        # Segmented DE / EN pill click switches language cleanly
+        QTest.mouseClick(self.win.lang_de_btn, Qt.MouseButton.LeftButton)
+        self.win._qt_app.processEvents()
+        self.assertEqual(self.win.lang, "de")
+        self.assertIn("Downloads & Home", self.win.btn_quick_scan.sub_lbl.text())
+        self.assertIn("Aktiv", self.win.meta_lbl.text())
+
+        # Missing clamscan + pkexec in German uses localized 'außerdem fehlt' (no English leak)
+        with mock.patch.object(
+            app_mod,
+            "get_clamav_metadata",
+            return_value={
+                "version": "Unavailable",
+                "freshclam_service": "inactive",
+                "has_clamscan": False,
+                "has_freshclam": False,
+                "has_virus_db": False,
+                "db_files_count": 0,
+                "db_dir": "/var/lib/clamav",
+                "missing_required": ["clamscan", "freshclam"],
+                "missing_optional": [],
+            },
+        ):
+            self.win._refresh_metadata()
+        self.assertIn("außerdem fehlt", self.win.hero_sub_lbl.text())
+        self.assertIn("Inaktiv", self.win.meta_lbl.text())
+
+        # Parsed log summary target localizes to German in History tab
+        Path(app_mod.DEFAULT_LOG_PATH).write_text(
+            "----------- SCAN SUMMARY -----------\n"
+            "Scanned files: 10\n"
+            "Infected files: 0\n"
+            "Start Date: 2026:11:21 15:00:00\n",
+            encoding="utf-8",
+        )
+        try:
+            self.win._refresh_history()
+            self.assertEqual(self.win.history_table.item(0, 1).text(), "System- / Protokollscan")
+        finally:
+            Path(app_mod.DEFAULT_LOG_PATH).unlink(missing_ok=True)
+
+        # Inspect error surfaces visibly in log_hint_lbl instead of failing silently
+        self.win._on_inspect_done(None, "Root helper restricts scan logs to /var/log/")
+        self.assertIn("Protokoll-Hinweis", self.win.log_hint_lbl.text())
+
+        # Switch back via EN pill cleanly
+        QTest.mouseClick(self.win.lang_en_btn, Qt.MouseButton.LeftButton)
+        self.win._qt_app.processEvents()
+        self.assertEqual(self.win.lang, "en")
 
 
 if __name__ == "__main__":
