@@ -1,0 +1,285 @@
+name: ClamAV Security Center CI (Multi-Distro KDE & GNOME)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-matrix:
+    name: "${{ matrix.distro.name }} (${{ matrix.desktop }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - id: opensuse-16
+            name: openSUSE Leap 16
+            pkg_mgr: zypper
+            pkg_type: rpm
+            rpm_flavor: opensuse
+            dist_tag: lp160
+          - id: opensuse-16.1
+            name: openSUSE Leap 16.1
+            pkg_mgr: zypper
+            pkg_type: rpm
+            rpm_flavor: opensuse
+            dist_tag: lp161
+          - id: opensuse-tumbleweed
+            name: openSUSE Tumbleweed
+            pkg_mgr: zypper
+            pkg_type: rpm
+            rpm_flavor: opensuse
+            dist_tag: tw
+          - id: rocky-10
+            name: Rocky Linux 10
+            pkg_mgr: dnf
+            pkg_type: rpm
+            rpm_flavor: rocky
+            dist_tag: el10
+          - id: fedora-45
+            name: Fedora 45
+            pkg_mgr: dnf
+            pkg_type: rpm
+            rpm_flavor: fedora
+            dist_tag: fc45
+          # Ubuntu runner disabled for now (GNOME support comes later)
+          # - id: ubuntu-26.04
+          #   name: Ubuntu 26.04
+          #   pkg_mgr: apt
+          #   pkg_type: deb
+          #   rpm_flavor: none
+          #   dist_tag: ubuntu2604
+          - id: kubuntu-26.04
+            name: Kubuntu 26.04
+            pkg_mgr: apt
+            pkg_type: deb
+            rpm_flavor: none
+            dist_tag: kubuntu2604
+        desktop:
+          - kde
+          - gnome
+        exclude:
+          # Kubuntu is KDE-only (ubuntu-26.04 runner remains disabled until needed)
+          - distro:
+              id: kubuntu-26.04
+              name: Kubuntu 26.04
+              pkg_mgr: apt
+              pkg_type: deb
+              rpm_flavor: none
+              dist_tag: kubuntu2604
+            desktop: gnome
+
+    # Active Gitea act_runner targets (opensuse-16, opensuse-16.1, opensuse-tumbleweed,
+    # rocky-10, fedora-45 on kde & gnome; kubuntu-26.04 on kde):
+    #   opensuse-16-kde, opensuse-16-gnome, opensuse-16.1-kde, opensuse-16.1-gnome,
+    #   opensuse-tumbleweed-kde, opensuse-tumbleweed-gnome, rocky-10-kde, rocky-10-gnome,
+    #   fedora-45-kde, fedora-45-gnome, kubuntu-26.04-kde
+    runs-on: ${{ matrix.distro.id }}-${{ matrix.desktop }}
+
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DISTRO_ID: ${{ matrix.distro.id }}
+      PKG_MGR: ${{ matrix.distro.pkg_mgr }}
+      PKG_TYPE: ${{ matrix.distro.pkg_type }}
+      RPM_FLAVOR: ${{ matrix.distro.rpm_flavor }}
+      DIST_TAG: ${{ matrix.distro.dist_tag }}
+      TARGET_DESKTOP: ${{ matrix.desktop }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inspect OS and desktop environment
+        run: |
+          cat /etc/os-release || true
+          python3 --version
+          echo "Target desktop: ${TARGET_DESKTOP} | Package type: ${PKG_TYPE}"
+          echo "Active XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unset}"
+          echo "Active DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unset}"
+          echo "Active WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset} DISPLAY=${DISPLAY:-unset}"
+
+      - name: Install runtime, packaging, and Qt6 dependencies
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          case "${PKG_MGR}" in
+            zypper)
+              ${SUDO} zypper --non-interactive refresh
+              ${SUDO} zypper --non-interactive install --no-recommends -y \
+                python3 python3-pip clamav findutils util-linux polkit procps \
+                libnotify-tools rpm-build desktop-file-utils desktop-file-utils-lang \
+                xvfb-run glib2-tools tar gzip || true
+              ${SUDO} zypper --non-interactive install --no-recommends -y python3-pyside6 \
+                || ${SUDO} zypper --non-interactive install --no-recommends -y python3-qt6 || true
+              if [ "${TARGET_DESKTOP}" = "gnome" ]; then
+                ${SUDO} zypper --non-interactive install --no-recommends -y \
+                  xdg-desktop-portal-gtk adwaita-icon-theme python3-gobject || true
+              else
+                ${SUDO} zypper --non-interactive install --no-recommends -y xdg-desktop-portal-kde || true
+              fi
+              ;;
+
+            dnf)
+              if grep -qiE 'rocky|rhel|almalinux' /etc/os-release 2>/dev/null; then
+                ${SUDO} dnf install -y epel-release || true
+                ${SUDO} dnf config-manager --set-enabled crb || true
+              fi
+              ${SUDO} dnf install -y \
+                python3 python3-pip clamav clamav-freshclam findutils util-linux polkit procps-ng \
+                libnotify rpm-build desktop-file-utils glib2 xorg-x11-server-Xvfb \
+                mesa-dri-drivers libxkbcommon libxkbcommon-x11 tar gzip || true
+              ${SUDO} dnf install -y python3-pyside6 || ${SUDO} dnf install -y python3-pyqt6 || true
+              if [ "${TARGET_DESKTOP}" = "gnome" ]; then
+                ${SUDO} dnf install -y qgnomeplatform-qt6 qt6-qtwayland xdg-desktop-portal-gtk \
+                  adwaita-icon-theme python3-gobject || true
+              else
+                ${SUDO} dnf install -y plasma-integration qt6-qtwayland xdg-desktop-portal-kde || true
+              fi
+              ;;
+
+            apt)
+              ${SUDO} apt-get update
+              DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
+                python3 python3-pip clamav clamav-freshclam findutils util-linux polkitd \
+                libnotify-bin dpkg-dev desktop-file-utils libglib2.0-bin xvfb \
+                libxkbcommon-x11-0 libegl1 libgl1 libdbus-1-3 || true
+              DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
+                python3-pyside6.qtwidgets python3-pyside6.qtgui python3-pyside6.qtcore python3-pyside6.qttest \
+                || DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends python3-pyqt6 \
+                || true
+              if [ "${TARGET_DESKTOP}" = "gnome" ]; then
+                DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends xdg-desktop-portal-gtk || true
+              else
+                DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends xdg-desktop-portal-kde || true
+              fi
+              ;;
+
+            *)
+              echo "Unsupported package manager: ${PKG_MGR}" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! python3 -c "import PySide6.QtWidgets, PySide6.QtTest" 2>/dev/null \
+             && ! python3 -c "import PyQt6.QtWidgets, PyQt6.QtTest" 2>/dev/null; then
+            python3 -m pip install --no-cache-dir --break-system-packages PySide6 \
+              || python3 -m pip install --no-cache-dir --user --break-system-packages PySide6
+          fi
+
+      - name: Verify Python bytecode compilation and scripts
+        run: |
+          python3 -m py_compile clamav_gui.py test_clamav_gui.py test_ui_clamav_gui.py packaging/verify_installed_os.py
+          bash -n run.sh packaging/build_packages.sh
+          if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate clamav-kde-gui.desktop
+          fi
+
+      - name: Run full backend and UI test suite (English & German)
+        run: |
+          if [ "${TARGET_DESKTOP}" = "kde" ]; then
+            export XDG_CURRENT_DESKTOP="KDE"
+            export DESKTOP_SESSION="plasma"
+          else
+            export XDG_CURRENT_DESKTOP="GNOME"
+            export DESKTOP_SESSION="gnome"
+          fi
+
+          QT_QPA_PLATFORM=offscreen LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+            python3 -m unittest discover -s . -p "test_*.py" -v
+
+          QT_QPA_PLATFORM=offscreen LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 \
+            python3 -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Build and install native DEB / RPM package on runner OS
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          chmod +x packaging/build_packages.sh
+          if [ "${PKG_TYPE}" = "rpm" ]; then
+            ./packaging/build_packages.sh \
+              --type rpm \
+              --rpm-flavor "${RPM_FLAVOR}" \
+              --dist-tag "${DIST_TAG}" \
+              --version 0.0.1 \
+              --release ci \
+              --out-dir dist-ci
+
+            if [ "${PKG_MGR}" = "zypper" ]; then
+              ${SUDO} zypper --non-interactive --no-gpg-checks install -y ./dist-ci/*.rpm
+            else
+              ${SUDO} dnf install -y ./dist-ci/*.rpm
+            fi
+          else
+            ./packaging/build_packages.sh \
+              --type deb \
+              --version 0.0.1 \
+              --release ci \
+              --out-dir dist-ci
+
+            DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y ./dist-ci/*.deb
+          fi
+
+      - name: Verify installed package, Start Menu entry, and Notification Panel / Tray integration
+        run: |
+          if [ "${TARGET_DESKTOP}" = "kde" ]; then
+            export XDG_CURRENT_DESKTOP="KDE"
+            export DESKTOP_SESSION="plasma"
+          else
+            export XDG_CURRENT_DESKTOP="GNOME"
+            export DESKTOP_SESSION="gnome"
+          fi
+
+          python3 packaging/verify_installed_os.py \
+            --pkg-type "${PKG_TYPE}" \
+            --desktop "${TARGET_DESKTOP}"
+
+      - name: Live desktop launch smoke test from installed package
+        run: |
+          if [ "${TARGET_DESKTOP}" = "kde" ]; then
+            export XDG_CURRENT_DESKTOP="KDE"
+            export DESKTOP_SESSION="plasma"
+          else
+            export XDG_CURRENT_DESKTOP="GNOME"
+            export DESKTOP_SESSION="gnome"
+          fi
+
+          for gui_lang in en de; do
+            set +e
+            if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then
+              timeout 4s /usr/bin/clamav-security-center --lang "${gui_lang}"
+              rc=$?
+            elif command -v xvfb-run >/dev/null 2>&1; then
+              QT_QPA_PLATFORM=xcb timeout 4s xvfb-run -a /usr/bin/clamav-security-center --lang "${gui_lang}"
+              rc=$?
+            else
+              QT_QPA_PLATFORM=offscreen timeout 4s /usr/bin/clamav-security-center --lang "${gui_lang}"
+              rc=$?
+            fi
+            set -e
+            if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 124 ]; then
+              echo "Installed GUI smoke test (${TARGET_DESKTOP}, --lang ${gui_lang}) failed with exit code ${rc}" >&2
+              exit "${rc}"
+            fi
+            echo "Installed GUI smoke test passed for desktop=${TARGET_DESKTOP}, lang=${gui_lang} (rc=${rc})"
+          done
+
+      - name: Clean up installed test package
+        if: always()
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+
+          case "${PKG_MGR}" in
+            zypper) ${SUDO} zypper --non-interactive remove -y clamav-security-center || true ;;
+            dnf)    ${SUDO} dnf remove -y clamav-security-center || true ;;
+            apt)    DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get remove -y clamav-security-center || true ;;
+          esac
+          rm -rf dist-ci

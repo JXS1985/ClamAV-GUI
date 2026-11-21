@@ -1,0 +1,144 @@
+name: Build DEB & RPM Packages (Manual)
+
+# Manually triggered workflow with explicit user-supplied version & release numbers.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version (e.g. 1.0.0)"
+        required: true
+        default: "1.0.0"
+        type: string
+      release:
+        description: "Package release number (e.g. 1)"
+        required: false
+        default: "1"
+        type: string
+
+jobs:
+  build-deb:
+    name: Build DEB (Kubuntu 26.04)
+    runs-on: kubuntu-26.04-kde
+    env:
+      PKG_VERSION: ${{ inputs.version }}
+      PKG_RELEASE: ${{ inputs.release || '1' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install DEB packaging tools
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          ${SUDO} apt-get update
+          DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
+            dpkg-dev desktop-file-utils python3
+
+      - name: Build .deb package
+        run: |
+          chmod +x packaging/build_packages.sh
+          ./packaging/build_packages.sh \
+            --type deb \
+            --version "${PKG_VERSION}" \
+            --release "${PKG_RELEASE}" \
+            --out-dir dist
+          (cd dist && sha256sum *.deb > SHA256SUMS.deb.txt)
+          ls -lh dist/
+
+      - name: Upload .deb package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clamav-security-center-deb-${{ inputs.version }}-${{ inputs.release || '1' }}
+          path: |
+            dist/*.deb
+            dist/SHA256SUMS.deb.txt
+
+  build-rpm:
+    name: "Build RPM (${{ matrix.target.name }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - runner: opensuse-16-kde
+            name: openSUSE Leap 16
+            pkg_mgr: zypper
+            flavor: opensuse
+            dist_tag: lp160
+          - runner: opensuse-16.1-kde
+            name: openSUSE Leap 16.1
+            pkg_mgr: zypper
+            flavor: opensuse
+            dist_tag: lp161
+          - runner: opensuse-tumbleweed-kde
+            name: openSUSE Tumbleweed
+            pkg_mgr: zypper
+            flavor: opensuse
+            dist_tag: tw
+          - runner: rocky-10-kde
+            name: Rocky Linux 10
+            pkg_mgr: dnf
+            flavor: rocky
+            dist_tag: el10
+          - runner: fedora-45-kde
+            name: Fedora 45
+            pkg_mgr: dnf
+            flavor: fedora
+            dist_tag: fc45
+
+    runs-on: ${{ matrix.target.runner }}
+    env:
+      PKG_VERSION: ${{ inputs.version }}
+      PKG_RELEASE: ${{ inputs.release || '1' }}
+      PKG_MGR: ${{ matrix.target.pkg_mgr }}
+      RPM_FLAVOR: ${{ matrix.target.flavor }}
+      DIST_TAG: ${{ matrix.target.dist_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install RPM packaging tools
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          case "${PKG_MGR}" in
+            zypper)
+              ${SUDO} zypper --non-interactive refresh
+              ${SUDO} zypper --non-interactive install --no-recommends -y \
+                rpm-build desktop-file-utils python3 tar gzip
+              ;;
+            dnf)
+              ${SUDO} dnf install -y \
+                rpm-build desktop-file-utils python3 tar gzip
+              ;;
+            *)
+              echo "Unsupported package manager: ${PKG_MGR}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build .rpm package
+        run: |
+          chmod +x packaging/build_packages.sh
+          ./packaging/build_packages.sh \
+            --type rpm \
+            --rpm-flavor "${RPM_FLAVOR}" \
+            --dist-tag "${DIST_TAG}" \
+            --version "${PKG_VERSION}" \
+            --release "${PKG_RELEASE}" \
+            --out-dir dist
+          (cd dist && sha256sum *.rpm > "SHA256SUMS.${DIST_TAG}.txt")
+          ls -lh dist/
+
+      - name: Upload .rpm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clamav-security-center-rpm-${{ matrix.target.dist_tag }}-${{ inputs.version }}-${{ inputs.release || '1' }}
+          path: |
+            dist/*.rpm
+            dist/SHA256SUMS.*.txt
