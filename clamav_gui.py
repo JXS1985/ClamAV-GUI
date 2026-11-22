@@ -65,9 +65,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "ClamAV Security Center",
         "app_title": "ClamAV Security Center",
         "detecting_clamav": "Detecting ClamAV...",
-        "meta_line": "Engine & DB: {version}   |   Auto-Updates: {service}",
         "root_active_badge": "●  Protected Access Active",
-        "lang_label": "Language:",
         "quit_btn": "Quit",
         "auth_banner_text": "Unlock admin access once for passwordless scans, quarantine & schedules.",
         "unlock_sudo_btn": "Unlock Password...",
@@ -84,19 +82,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Estimated time remaining: {eta}  •  Checking: {file}",
         "hero_bg_title": "Scan Running in Background",
         "hero_bg_sub": "Unlock Root Access above to view exact percentage, time remaining, and live files.",
-        "btn_quick_scan": "Quick Scan (Home & Downloads)",
-        "btn_full_scan": "Full System Scan (Entire Drive)",
-        "btn_pick_scan": "Scan Folder or File...",
         "drop_hint": "Tip: Drag & drop files or folders here to scan",
         "card_status_title": "Scan Status",
         "card_cpu_title": "Elapsed / Activity",
         "card_io_title": "Memory / Disk Read",
         "card_threats_title": "Threats Found",
-        "state_idle": "IDLE",
         "state_running": "RUNNING",
         "state_paused": "PAUSED",
-        "ready_to_scan": "Ready to scan",
-        "waiting": "Waiting",
         "idle_word": "Idle",
         "clean_so_far": "Clean so far",
         "action_recommended": "Action recommended",
@@ -222,7 +214,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Command Preview:",
         "start_custom_btn": "Start Custom Scan",
         "db_checking": "Checking ClamAV database status...",
-        "db_status_text": "Installed ClamAV Version: {version}\nBackground Auto-Updater (clamav-freshclam): {service}",
         "freshclam_btn": "Update Virus Signatures Now (freshclam)",
         "freshclam_updating": "Updating Signatures...",
         "freshclam_ph": "freshclam update output will appear here...",
@@ -347,9 +338,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "ClamAV Sicherheitszentrum",
         "app_title": "ClamAV Sicherheitszentrum",
         "detecting_clamav": "ClamAV wird erkannt...",
-        "meta_line": "Engine & DB: {version}   |   Auto-Updates: {service}",
         "root_active_badge": "●  Geschützter Zugriff aktiv",
-        "lang_label": "Sprache:",
         "quit_btn": "Beenden",
         "auth_banner_text": "Admin-Zugriff einmalig freischalten für passwortlose Scans, Quarantäne & Zeitpläne.",
         "unlock_sudo_btn": "Passwort freischalten...",
@@ -366,19 +355,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Geschätzte Restzeit: {eta}  •  Prüfe: {file}",
         "hero_bg_title": "Scan läuft im Hintergrund",
         "hero_bg_sub": "Schalten Sie oben den Root-Zugriff frei, um Prozentwert, Restzeit und Live-Dateien zu sehen.",
-        "btn_quick_scan": "Schnellscan (Home & Downloads)",
-        "btn_full_scan": "Vollständiger Systemscan (Gesamte Festplatte)",
-        "btn_pick_scan": "Ordner oder Datei scannen...",
         "drop_hint": "Tipp: Dateien oder Ordner zum Scannen hierher ziehen",
         "card_status_title": "Scan-Status",
         "card_cpu_title": "Laufzeit / Aktivität",
         "card_io_title": "RAM / Festplatte gelesen",
         "card_threats_title": "Gefundene Bedrohungen",
-        "state_idle": "BEREIT",
         "state_running": "LÄUFT",
         "state_paused": "PAUSIERT",
-        "ready_to_scan": "Bereit zum Scannen",
-        "waiting": "Wartet",
         "idle_word": "Inaktiv",
         "clean_so_far": "Bisher sauber",
         "action_recommended": "Aktion empfohlen",
@@ -504,7 +487,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Befehlsvorschau:",
         "start_custom_btn": "Benutzerdefinierten Scan starten",
         "db_checking": "Prüfe Status der ClamAV-Datenbank...",
-        "db_status_text": "Installierte ClamAV-Version: {version}\nAutomatischer Hintergrund-Updater: {service}",
         "freshclam_btn": "Virensignaturen jetzt aktualisieren (freshclam)",
         "freshclam_updating": "Signatur-Update läuft...",
         "freshclam_ph": "Ausgabe von freshclam erscheint hier...",
@@ -629,9 +611,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "Centro de Seguridad ClamAV",
         "app_title": "Centro de Seguridad ClamAV",
         "detecting_clamav": "Detectando ClamAV...",
-        "meta_line": "Motor y BD: {version}   |   Actualizaciones: {service}",
         "root_active_badge": "●  Acceso protegido activo",
-        "lang_label": "Idioma:",
         "quit_btn": "Salir",
         "auth_banner_text": "Desbloquee el acceso root una vez para análisis, cuarentena y programación.",
         "unlock_sudo_btn": "Contraseña...",
@@ -648,19 +628,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Tiempo restante: {eta}  •  Archivo: {file}",
         "hero_bg_title": "Análisis en segundo plano",
         "hero_bg_sub": "Desbloquee el acceso root arriba para ver porcentaje, tiempo restante y archivo actual.",
-        "btn_quick_scan": "Análisis rápido (Inicio y Descargas)",
-        "btn_full_scan": "Análisis completo del sistema",
-        "btn_pick_scan": "Analizar carpeta o archivo...",
         "drop_hint": "Consejo: arrastre archivos o carpetas aquí",
         "card_status_title": "Estado del análisis",
         "card_cpu_title": "Tiempo / Actividad",
         "card_io_title": "RAM / Lectura disco",
         "card_threats_title": "Amenazas",
-        "state_idle": "INACTIVO",
         "state_running": "EN CURSO",
         "state_paused": "PAUSADO",
-        "ready_to_scan": "Listo",
-        "waiting": "Esperando",
         "idle_word": "Inactivo",
         "clean_so_far": "Sin amenazas",
         "action_recommended": "Acción recomendada",
@@ -786,7 +760,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Vista del comando:",
         "start_custom_btn": "Iniciar análisis personalizado",
         "db_checking": "Comprobando base de datos ClamAV...",
-        "db_status_text": "Versión ClamAV: {version}\nServicio auto-actualizador: {service}",
         "freshclam_btn": "Actualizar firmas ahora (freshclam)",
         "freshclam_updating": "Actualizando firmas...",
         "freshclam_ph": "La salida de freshclam aparecerá aquí...",
@@ -911,9 +884,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "Centre de sécurité ClamAV",
         "app_title": "Centre de sécurité ClamAV",
         "detecting_clamav": "Détection de ClamAV...",
-        "meta_line": "Moteur & BD : {version}   |   Mises à jour : {service}",
         "root_active_badge": "●  Accès protégé actif",
-        "lang_label": "Langue :",
         "quit_btn": "Quitter",
         "auth_banner_text": "Déverrouillez l'accès root une fois pour analyses, quarantaine et planifications.",
         "unlock_sudo_btn": "Mot de passe...",
@@ -930,19 +901,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Temps restant : {eta}  •  Fichier : {file}",
         "hero_bg_title": "Analyse en arrière-plan",
         "hero_bg_sub": "Déverrouillez l'accès root ci-dessus pour voir le pourcentage et le fichier en direct.",
-        "btn_quick_scan": "Analyse rapide (Accueil et Téléchargements)",
-        "btn_full_scan": "Analyse complète du système",
-        "btn_pick_scan": "Analyser un dossier ou fichier...",
         "drop_hint": "Astuce : glissez des fichiers ou dossiers ici",
         "card_status_title": "État",
         "card_cpu_title": "Durée / Activité",
         "card_io_title": "RAM / Lecture disque",
         "card_threats_title": "Menaces",
-        "state_idle": "INACTIF",
         "state_running": "EN COURS",
         "state_paused": "EN PAUSE",
-        "ready_to_scan": "Prêt",
-        "waiting": "En attente",
         "idle_word": "Inactif",
         "clean_so_far": "Aucune menace",
         "action_recommended": "Action requise",
@@ -1068,7 +1033,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Aperçu commande :",
         "start_custom_btn": "Lancer l'analyse avancée",
         "db_checking": "Vérification de la base ClamAV...",
-        "db_status_text": "Version ClamAV : {version}\nMise à jour auto : {service}",
         "freshclam_btn": "Mettre à jour les signatures (freshclam)",
         "freshclam_updating": "Mise à jour...",
         "freshclam_ph": "La sortie de freshclam apparaîtra ici...",
@@ -1193,9 +1157,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "Central de Segurança ClamAV",
         "app_title": "Central de Segurança ClamAV",
         "detecting_clamav": "Detectando ClamAV...",
-        "meta_line": "Motor e BD: {version}   |   Atualizações: {service}",
         "root_active_badge": "●  Acesso protegido ativo",
-        "lang_label": "Idioma:",
         "quit_btn": "Sair",
         "auth_banner_text": "Desbloqueie o acesso root uma vez para verificações, quarentena e agendamentos.",
         "unlock_sudo_btn": "Senha...",
@@ -1212,19 +1174,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Tempo restante: {eta}  •  Arquivo: {file}",
         "hero_bg_title": "Verificação em segundo plano",
         "hero_bg_sub": "Desbloqueie o acesso root acima para ver o progresso ao vivo.",
-        "btn_quick_scan": "Verificação rápida (Início e Downloads)",
-        "btn_full_scan": "Verificação completa do sistema",
-        "btn_pick_scan": "Verificar pasta ou arquivo...",
         "drop_hint": "Dica: arraste arquivos ou pastas aqui",
         "card_status_title": "Status",
         "card_cpu_title": "Tempo / Atividade",
         "card_io_title": "RAM / Leitura disco",
         "card_threats_title": "Ameaças",
-        "state_idle": "OCIOSO",
         "state_running": "EM EXECUÇÃO",
         "state_paused": "PAUSADO",
-        "ready_to_scan": "Pronto",
-        "waiting": "Aguardando",
         "idle_word": "Ocioso",
         "clean_so_far": "Nenhuma ameaça",
         "action_recommended": "Ação recomendada",
@@ -1350,7 +1306,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Prévia do comando:",
         "start_custom_btn": "Iniciar verificação personalizada",
         "db_checking": "Verificando base ClamAV...",
-        "db_status_text": "Versão ClamAV: {version}\nAtualizador automático: {service}",
         "freshclam_btn": "Atualizar assinaturas agora (freshclam)",
         "freshclam_updating": "Atualizando assinaturas...",
         "freshclam_ph": "A saída do freshclam aparecerá aqui...",
@@ -1475,9 +1430,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "ClamAV 安全中心",
         "app_title": "ClamAV 安全中心",
         "detecting_clamav": "正在检测 ClamAV...",
-        "meta_line": "引擎与病毒库: {version}   |   自动更新: {service}",
         "root_active_badge": "●  受保护访问已启用",
-        "lang_label": "语言:",
         "quit_btn": "退出",
         "auth_banner_text": "解锁一次管理员权限，即可启用免密扫描、隔离与定时任务。",
         "unlock_sudo_btn": "密码解锁...",
@@ -1494,19 +1447,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "预计剩余: {eta}  •  当前文件: {file}",
         "hero_bg_title": "扫描正在后台运行",
         "hero_bg_sub": "解锁上方管理员权限即可查看实时百分比和当前文件。",
-        "btn_quick_scan": "快速扫描 (主目录与下载)",
-        "btn_full_scan": "全盘系统扫描",
-        "btn_pick_scan": "扫描文件或文件夹...",
         "drop_hint": "提示：将文件或文件夹拖放到此处即可扫描",
         "card_status_title": "扫描状态",
         "card_cpu_title": "已用时间",
         "card_io_title": "内存 / 读取",
         "card_threats_title": "发现威胁",
-        "state_idle": "空闲",
         "state_running": "运行中",
         "state_paused": "已暂停",
-        "ready_to_scan": "就绪",
-        "waiting": "等待中",
         "idle_word": "空闲",
         "clean_so_far": "安全",
         "action_recommended": "建议处理",
@@ -1632,7 +1579,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "命令预览:",
         "start_custom_btn": "开始自定义扫描",
         "db_checking": "正在检查 ClamAV 病毒库状态...",
-        "db_status_text": "ClamAV 版本: {version}\n后台自动更新服务: {service}",
         "freshclam_btn": "立即更新病毒库 (freshclam)",
         "freshclam_updating": "正在更新病毒库...",
         "freshclam_ph": "freshclam 更新输出将显示在此处...",
@@ -1757,9 +1703,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "ClamAV セキュリティセンター",
         "app_title": "ClamAV セキュリティセンター",
         "detecting_clamav": "ClamAV を検出中...",
-        "meta_line": "エンジン & DB: {version}   |   自動更新: {service}",
         "root_active_badge": "●  保護アクセス有効",
-        "lang_label": "言語:",
         "quit_btn": "終了",
         "auth_banner_text": "管理者アクセスを解除すると、隔離やスケジュール管理が有効になります。",
         "unlock_sudo_btn": "パスワード解除...",
@@ -1776,19 +1720,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "残り時間: {eta}  •  確認中: {file}",
         "hero_bg_title": "バックグラウンドでスキャン中",
         "hero_bg_sub": "上の管理者権限を解除すると進捗率と現在のファイルを確認できます。",
-        "btn_quick_scan": "クイックスキャン (ホーム & ダウンロード)",
-        "btn_full_scan": "フルシステムスキャン",
-        "btn_pick_scan": "フォルダまたはファイルをスキャン...",
         "drop_hint": "ヒント: ファイルやフォルダをここにドロップしてスキャン",
         "card_status_title": "ステータス",
         "card_cpu_title": "経過 / 状態",
         "card_io_title": "メモリ / 読込",
         "card_threats_title": "検出数",
-        "state_idle": "待機中",
         "state_running": "実行中",
         "state_paused": "一時停止",
-        "ready_to_scan": "準備完了",
-        "waiting": "待機",
         "idle_word": "待機",
         "clean_so_far": "安全",
         "action_recommended": "対処推奨",
@@ -1914,7 +1852,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "コマンドプレビュー:",
         "start_custom_btn": "詳細スキャンを開始",
         "db_checking": "ClamAV データベースを確認中...",
-        "db_status_text": "ClamAV バージョン: {version}\n自動更新サービス: {service}",
         "freshclam_btn": "定義ファイルを今すぐ更新 (freshclam)",
         "freshclam_updating": "更新中...",
         "freshclam_ph": "freshclam の出力がここに表示されます...",
@@ -2039,9 +1976,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "window_title": "Центр безопасности ClamAV",
         "app_title": "Центр безопасности ClamAV",
         "detecting_clamav": "Поиск ClamAV...",
-        "meta_line": "Движок и БД: {version}   |   Автообновление: {service}",
         "root_active_badge": "●  Защищённый доступ активен",
-        "lang_label": "Язык:",
         "quit_btn": "Выход",
         "auth_banner_text": "Откройте root-доступ один раз для проверок, карантина и расписания.",
         "unlock_sudo_btn": "Пароль...",
@@ -2058,19 +1993,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hero_scanning_sub": "Осталось: {eta}  •  Файл: {file}",
         "hero_bg_title": "Проверка в фоне",
         "hero_bg_sub": "Разблокируйте root выше, чтобы видеть процент и текущий файл.",
-        "btn_quick_scan": "Быстрая проверка (Дом и Загрузки)",
-        "btn_full_scan": "Полная проверка системы",
-        "btn_pick_scan": "Проверить папку или файл...",
         "drop_hint": "Перетащите файлы или папки сюда",
         "card_status_title": "Статус",
         "card_cpu_title": "Время / Режим",
         "card_io_title": "ОЗУ / Чтение",
         "card_threats_title": "Угрозы",
-        "state_idle": "ОЖИДАНИЕ",
         "state_running": "ПРОВЕРКА",
         "state_paused": "ПАУЗА",
-        "ready_to_scan": "Готов",
-        "waiting": "Ожидание",
         "idle_word": "Простой",
         "clean_so_far": "Угроз нет",
         "action_recommended": "Нужно действие",
@@ -2196,7 +2125,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "adv_cmd_lbl": "Команда:",
         "start_custom_btn": "Запустить проверку",
         "db_checking": "Проверка базы ClamAV...",
-        "db_status_text": "ClamAV: {version}\nАвтообновление: {service}",
         "freshclam_btn": "Обновить базы сейчас (freshclam)",
         "freshclam_updating": "Обновление баз...",
         "freshclam_ph": "Вывод freshclam появится здесь...",
@@ -2354,7 +2282,7 @@ def detect_default_language(_settings: dict[str, Any] | None = None) -> str:
 
 
 def tr(lang: str, key: str, **kwargs: Any) -> str:
-    """Translate key for lang ('de' or 'en'), formatting optional placeholders."""
+    """Translate key across supported locales, formatting optional placeholders."""
     table = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
     template = table.get(key) or TRANSLATIONS["en"].get(key) or key
     if kwargs:
@@ -2809,6 +2737,9 @@ def start_background_precount(
     def _worker() -> None:
         global _PRECOUNT_PROC
         t0 = time.monotonic()
+        with _PRECOUNT_LOCK:
+            if _PRECOUNT_STATE.get("gen") != gen:
+                return
         cmd: list[str] = []
         if shutil.which("ionice"):
             cmd.extend(["ionice", "-c", "3"])
@@ -2842,11 +2773,31 @@ def start_background_precount(
                     _PRECOUNT_STATE["done"] = True
             return
 
+        cancelled_early = False
         with _PRECOUNT_LOCK:
             if _PRECOUNT_STATE.get("gen") != gen:
+                cancelled_early = True
+            else:
+                _PRECOUNT_PROC = proc
+        if cancelled_early:
+            try:
                 proc.terminate()
-                return
-            _PRECOUNT_PROC = proc
+            except OSError:
+                pass
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            return
 
         all_files = 0
         all_bytes = 0
@@ -2881,10 +2832,24 @@ def start_background_precount(
                         )
             proc.wait()
         finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
             try:
-                proc.stdout.close()
+                if proc.stdout is not None:
+                    proc.stdout.close()
             except OSError:
                 pass
+            try:
+                proc.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
         with _PRECOUNT_LOCK:
             if _PRECOUNT_PROC is proc:
                 _PRECOUNT_PROC = None
@@ -3726,9 +3691,14 @@ def _helper_quarantine_file(params: dict[str, Any]) -> dict[str, Any]:
 
     base = os.path.basename(src)
     dest = os.path.join(qdir, base)
-    if os.path.exists(dest):
+    if os.path.lexists(dest):
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = os.path.join(qdir, f"{base}.{stamp}")
+        candidate = os.path.join(qdir, f"{base}.{stamp}")
+        suffix = 1
+        while os.path.lexists(candidate):
+            candidate = os.path.join(qdir, f"{base}.{stamp}.{suffix}")
+            suffix += 1
+        dest = candidate
 
     shutil.move(src, dest)
     if not os.path.islink(dest):
@@ -3784,6 +3754,19 @@ def _helper_list_quarantine(params: dict[str, Any]) -> dict[str, Any]:
     return {"items": items}
 
 
+def _ensure_no_symlink_ancestors_and_mkdir(directory: str) -> None:
+    """Create missing directories along an absolute path while rejecting any symlink ancestor."""
+    cur = Path("/")
+    for part in Path(os.path.abspath(directory)).parts[1:]:
+        cur = cur / part
+        if cur.is_symlink():
+            raise PermissionError(f"Refusing to restore across symlink directory: {cur}")
+        if not cur.exists():
+            cur.mkdir(mode=0o755, exist_ok=True)
+        elif not cur.is_dir():
+            raise NotADirectoryError(f"Non-directory ancestor in restore path: {cur}")
+
+
 def _helper_restore_quarantine(params: dict[str, Any]) -> dict[str, Any]:
     qdir = _resolve_quarantine_dir(params.get("quarantine_dir"))
     name = str(params["name"])
@@ -3810,9 +3793,7 @@ def _helper_restore_quarantine(params: dict[str, Any]) -> dict[str, Any]:
 
     parent = os.path.dirname(dest)
     if parent:
-        os.makedirs(parent, exist_ok=True)
-        if os.path.islink(parent):
-            raise PermissionError(f"Refusing to restore into symlink directory: {parent}")
+        _ensure_no_symlink_ancestors_and_mkdir(parent)
 
     shutil.move(src, dest)
     if dest.startswith("/home/"):
@@ -5087,6 +5068,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._last_eta_str: str = "--:--:--"
             self._pending_scan_labels: dict[int, str] = {}
             self._last_meta: dict[str, Any] = {}
+            self._log_reload_error: str = ""
 
             self.helper.on_disconnect = self.signals.helper_disconnected.emit
             self.signals.pkexec_done.connect(self._on_pkexec_done)
@@ -5181,6 +5163,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 return
             if self._tray_icon is not None:
                 self._tray_icon.hide()
+            cancel_background_precount()
             self.helper.close()
             super().closeEvent(event)
 
@@ -6309,6 +6292,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._update_threat_count()
 
         def _on_root_unlocked(self) -> None:
+            self._log_reload_error = ""
             self._reset_log_state(reset_offset=True)
             self._update_auth_banner()
             self._update_controls_enabled()
@@ -6625,7 +6609,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self._render_idle_stats_strip()
                 if not self.helper.is_connected:
                     self.current_file_edit.setText(self._tr("no_active_scan_running"))
-                self.log_hint_lbl.setText("")
+                self.log_hint_lbl.setText(self._log_reload_error)
                 self.restart_verbose_btn.setVisible(False)
                 self._update_progress_ui(None)
                 return
@@ -7005,6 +6989,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         def _reload_log(self) -> None:
             self.telemetry.log_path = self.log_path_edit.text().strip()
             self._reset_log_state(reset_offset=True)
+            self._log_reload_error = ""
+            if not self.helper.is_connected and self.telemetry.log_path:
+                lp = self.telemetry.log_path
+                if not os.path.exists(lp):
+                    self._log_reload_error = self._tr("log_inspect_err", err=f"{lp}: {os.strerror(2)}")
+                elif not os.access(lp, os.R_OK):
+                    self._log_reload_error = self._tr("log_inspect_err", err=f"{lp}: {os.strerror(13)}")
+            self.log_hint_lbl.setText(self._log_reload_error)
             self._poll_tick()
 
         def _restart_scan_without_i(self) -> None:
@@ -7035,10 +7027,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 new_args = ["clamscan", "-r", "/"]
 
             log_path = proc.get("log_path") or self.log_path_edit.text().strip() or DEFAULT_LOG_PATH
+            prev_pid = proc["pid"]
+            prev_label = self._pending_scan_labels.pop(prev_pid, None)
+            want_bg = self.bg_mode_chk.isChecked()
             try:
-                self.helper.call("signal_proc", {"pid": proc["pid"], "sig": "SIGTERM"})
+                self.helper.call("signal_proc", {"pid": prev_pid, "sig": "SIGTERM"})
+                cancel_background_precount()
                 deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and os.path.exists(f"/proc/{proc['pid']}"):
+                while time.monotonic() < deadline and os.path.exists(f"/proc/{prev_pid}"):
                     time.sleep(0.1)
 
                 res = self.helper.call(
@@ -7046,7 +7042,16 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     {"cmd_args": new_args, "log_path": log_path, "truncate_log": True},
                 )
                 self._reset_log_state(reset_offset=True)
-                self.telemetry.selected_pid = res.get("pid")
+                new_pid = res.get("pid")
+                if isinstance(new_pid, int):
+                    if prev_label:
+                        self._pending_scan_labels[new_pid] = prev_label
+                    if want_bg:
+                        try:
+                            self.helper.call("set_priority", {"pid": new_pid, "mode": "idle"})
+                        except Exception:  # noqa: BLE001
+                            pass
+                self.telemetry.selected_pid = new_pid
                 self.telemetry.log_path = log_path
                 self.log_path_edit.setText(log_path)
                 self._poll_tick()

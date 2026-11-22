@@ -155,6 +155,18 @@ Description: ClamAV Security Center GUI for KDE Plasma and GNOME
  and managing ClamAV antivirus scans, quarantine, and freshclam updates.
 EOF
 
+  cat > "${stage_dir}/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -d /usr/share/icons/hicolor ]; then
+  gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+EOF
+  chmod 0755 "${stage_dir}/DEBIAN/postinst"
+
   deb_file="${OUT_DIR}/${PKG_NAME}_${deb_ver}_all.deb"
   dpkg-deb --root-owner-group --build "${stage_dir}" "${deb_file}"
   echo "Built DEB: ${deb_file}"
@@ -225,7 +237,7 @@ ${recommends_block}
 %description
 Qt6 desktop control center for running, monitoring, pausing, scheduling,
 and managing ClamAV antivirus scans, quarantine, and freshclam updates
-in both English and German.
+with automatic OS locale detection across 8 languages.
 
 %prep
 %setup -q
@@ -253,6 +265,22 @@ install -m 0644 packaging/clamav-kde-gui.svg %{buildroot}%{_datadir}/icons/hicol
 %{_bindir}/clamav-kde-gui
 %{_datadir}/applications/clamav-kde-gui.desktop
 %{_datadir}/icons/hicolor/scalable/apps/clamav-kde-gui.svg
+
+%post
+if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -d /usr/share/icons/hicolor ]; then
+  gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
+
+%postun
+if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -d /usr/share/icons/hicolor ]; then
+  gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || true
+fi
 
 %changelog
 * $(LC_ALL=C date +"%a %b %d %Y") Maintainer <noreply@localhost> - ${rpm_ver}-${rpm_rel}

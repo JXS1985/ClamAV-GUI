@@ -764,6 +764,55 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 proc.terminate()
                 proc.wait(timeout=2.0)
 
+    def test_restart_without_i_preserves_bg_priority_and_disconnected_reload_log_errors(self) -> None:
+        proc = {
+            "pid": 6161,
+            "cmdline": ["clamscan", "-ri", "--log=/var/log/clamav-scan.log", "/home"],
+            "state": "R",
+            "elapsed_sec": 10.0,
+            "quiet_infected_only": True,
+            "nice": 19,
+            "rss_kb": 1024,
+            "cpu_ticks": 10,
+            "user": "root",
+            "uid": 0,
+            "log_path": "/var/log/clamav-scan.log",
+        }
+        self.win._current_proc = dict(proc)
+        self.win._pending_scan_labels[6161] = "Custom Scan (/home)"
+        self.win.bg_mode_chk.setChecked(True)
+
+        with (
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            mock.patch.object(self.win.helper, "call", side_effect=[{}, {"pid": 6262}, {}]) as mock_call,
+            mock.patch.object(app_mod, "cancel_background_precount") as mock_cancel_pre,
+            mock.patch("os.path.exists", return_value=False),
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+        ):
+            self.win._restart_scan_without_i()
+            mock_cancel_pre.assert_called_once()
+        actions = [(c[0][0], c[0][1]) for c in mock_call.call_args_list]
+        self.assertEqual(actions[0][0], "signal_proc")
+        self.assertEqual(actions[1][0], "start_scan")
+        self.assertEqual(actions[2], ("set_priority", {"pid": 6262, "mode": "idle"}))
+        self.assertEqual(self.win._pending_scan_labels.get(6262), "Custom Scan (/home)")
+        self.assertNotIn(6161, self.win._pending_scan_labels)
+
+        # Disconnected _reload_log surfaces missing-file feedback in log_hint_lbl
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_log = str(Path(tmpdir) / "does_not_exist.log")
+            self.win.log_path_edit.setText(missing_log)
+            with mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]):
+                self.win._reload_log()
+            self.assertIn("does_not_exist.log", self.win.log_hint_lbl.text())
+
+        # Full closeEvent calls cancel_background_precount()
+        self.win._force_quit = True
+        with mock.patch.object(app_mod, "cancel_background_precount") as mock_close_pre:
+            self.win.closeEvent(QCloseEvent())
+            mock_close_pre.assert_called_once()
+
 
 class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
     """UI tests for Threats tab, Quarantine tab, and History tab actions."""
@@ -1107,6 +1156,22 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             mock_launch.assert_called_once()
             self.assertEqual(mock_launch.call_args[0][0], [str(f1)])
             self.assertIn("suspect1.exe", mock_launch.call_args[1]["label"])
+
+            # Dropping >5 files truncates preview with dlg_drop_more
+            many = []
+            for idx in range(7):
+                fp = Path(drop_dir) / f"f{idx}.bin"
+                fp.write_bytes(b"x")
+                many.append(QUrl.fromLocalFile(str(fp)))
+            mime_many = QMimeData()
+            mime_many.setUrls(many)
+            ev_many = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime_many, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            with (
+                mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No) as mock_q,
+                mock.patch.object(self.win, "_launch_scan_args"),
+            ):
+                self.win.dropEvent(ev_many)
+            self.assertIn("and 2 more", mock_q.call_args[0][2])
 
     def test_tray_setup_close_to_tray_and_quit(self) -> None:
         fake_tray = mock.Mock()

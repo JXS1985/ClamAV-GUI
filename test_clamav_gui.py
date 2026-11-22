@@ -1220,6 +1220,54 @@ class TestScheduleAndCancellation(unittest.TestCase):
                 app_mod.SYSTEMD_SERVICE_PATH = orig_svc
                 app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
+    def test_quarantine_collision_same_second_and_restore_symlink_ancestor_guard(self) -> None:
+        import datetime
+
+        fixed_now = datetime.datetime(2026, 11, 22, 1, 30, 0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            qdir = root / "quarantine"
+            d1 = root / "dir1"
+            d2 = root / "dir2"
+            d3 = root / "dir3"
+            d1.mkdir()
+            d2.mkdir()
+            d3.mkdir()
+            f1 = d1 / "sample.bin"
+            f2 = d2 / "sample.bin"
+            f3 = d3 / "sample.bin"
+            f1.write_bytes(b"first")
+            f2.write_bytes(b"second")
+            f3.write_bytes(b"third")
+
+            with mock.patch("datetime.datetime") as mock_dt:
+                mock_dt.now.return_value = fixed_now
+                r1 = app_mod._helper_quarantine_file({"path": str(f1), "quarantine_dir": str(qdir)})
+                r2 = app_mod._helper_quarantine_file({"path": str(f2), "quarantine_dir": str(qdir)})
+                r3 = app_mod._helper_quarantine_file({"path": str(f3), "quarantine_dir": str(qdir)})
+
+            self.assertNotEqual(r1["name"], r2["name"])
+            self.assertNotEqual(r2["name"], r3["name"])
+            self.assertEqual(Path(r1["dest"]).read_bytes(), b"first")
+            self.assertEqual(Path(r2["dest"]).read_bytes(), b"second")
+            self.assertEqual(Path(r3["dest"]).read_bytes(), b"third")
+
+            # Restore must reject symlink ancestor before creating subdirectories
+            real_target_dir = root / "real_target"
+            real_target_dir.mkdir()
+            sym_parent = root / "sym_link"
+            sym_parent.symlink_to(real_target_dir)
+            with self.assertRaises(PermissionError):
+                app_mod._helper_restore_quarantine(
+                    {
+                        "name": r1["name"],
+                        "quarantine_dir": str(qdir),
+                        "dest_path": str(sym_parent / "nested" / "restored.bin"),
+                    }
+                )
+            self.assertFalse((real_target_dir / "nested").exists())
+            self.assertTrue(Path(r1["dest"]).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
