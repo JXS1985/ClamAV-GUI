@@ -1289,17 +1289,24 @@ class TestWindowsCompatibility(unittest.TestCase):
                 "LOCALAPPDATA": "/tmp/win_local",
                 "ProgramFiles": "/tmp/win_pf",
                 "ProgramFiles(x86)": "/tmp/win_pf86",
+                "ProgramData": "/tmp/win_pdata",
             },
             clear=False,
         ):
             dirs = app_mod._win_clamav_dirs()
         self.assertTrue(any("ClamAV" in d for d in dirs))
+        self.assertTrue(any("chocolatey" in d for d in dirs))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             empty_db = root / "empty"
             empty_db.mkdir()
             self.assertFalse(app_mod._has_clamav_db_files(str(empty_db)))
+
+            ndb_dir = root / "ndb_only"
+            ndb_dir.mkdir()
+            (ndb_dir / "custom.ndb").write_text("Sig:0:*:4142\n", encoding="utf-8")
+            self.assertTrue(app_mod._has_clamav_db_files(str(ndb_dir)))
 
             install_dir = root / "ClamAV"
             db_dir = install_dir / "database"
@@ -1514,6 +1521,15 @@ class TestWindowsCompatibility(unittest.TestCase):
                 app_mod.APP_DATA_DIR = orig_app_dir
                 app_mod.WINDOWS_SCHEDULE_CONFIG_PATH = orig_cfg
                 app_mod.DEFAULT_LOG_PATH = orig_log
+
+    def test_frozen_self_test_fallback_temp_log(self) -> None:
+        real_helper_cmd = [sys.executable, app_mod.SCRIPT_PATH, "--helper"]
+        with (
+            mock.patch.object(app_mod, "_is_posix_root", return_value=False),
+            mock.patch.object(app_mod, "SCRIPT_PATH", "/nonexistent/_MEIPASS/clamav_gui.py"),
+            mock.patch.object(app_mod, "_self_helper_cmd", return_value=real_helper_cmd),
+        ):
+            self.assertEqual(app_mod.run_self_test(), 0)
 
 
 class TestUserModeFallback(unittest.TestCase):

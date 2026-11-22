@@ -66,13 +66,26 @@ def _win_clamav_dirs() -> list[str]:
     local_app = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     prog_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
     prog_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    prog_data = os.environ.get("ProgramData") or r"C:\ProgramData"
+    choco_tools = os.path.join(prog_data, "chocolatey", "lib", "clamav", "tools")
     candidates = [
         os.path.join(prog_files, "ClamAV"),
         os.path.join(prog_x86, "ClamAV"),
         r"C:\ClamAV",
         os.path.join(local_app, "Programs", "ClamAV"),
         os.path.join(local_app, "ClamAV"),
+        os.path.join(prog_data, "chocolatey", "bin"),
+        choco_tools,
     ]
+    if os.path.isdir(choco_tools):
+        try:
+            for sub in sorted(os.listdir(choco_tools)):
+                if sub.lower().startswith("clamav"):
+                    sub_path = os.path.join(choco_tools, sub)
+                    if os.path.isdir(sub_path):
+                        candidates.append(sub_path)
+        except OSError:
+            pass
     return [p for i, p in enumerate(candidates) if p and p not in candidates[:i]]
 
 
@@ -4440,13 +4453,16 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
     return {"pid": proc.pid, "cmd": cmd_args, "log_path": log_path}
 
 
+_CLAMAV_DB_EXTS = (".cvd", ".cld", ".ndb", ".hdb", ".ldb")
+
+
 def _has_clamav_db_files(db_dir: str) -> bool:
-    """Return True if db_dir contains at least one non-empty .cvd/.cld signature database."""
+    """Return True if db_dir contains at least one non-empty signature database file."""
     if not db_dir or not os.path.isdir(db_dir):
         return False
     try:
         for name in os.listdir(db_dir):
-            if name.endswith((".cvd", ".cld")):
+            if name.endswith(_CLAMAV_DB_EXTS):
                 full = os.path.join(db_dir, name)
                 if os.path.isfile(full) and os.path.getsize(full) > 0:
                     return True
@@ -5424,6 +5440,11 @@ def run_self_test() -> int:
                 cleanup_test_log = True
             else:
                 test_log_path = ""
+        elif not os.path.isfile(test_log_path):
+            fd, test_log_path = tempfile.mkstemp(prefix="clamav-selftest-", suffix=".log")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("# clamav-security-center self-test\n")
+            cleanup_test_log = True
 
         try:
             helper_proc.stdin.write(
@@ -5804,7 +5825,7 @@ def check_system_dependencies(db_dir: str | None = None) -> dict[str, Any]:
     if os.path.isdir(resolved_db_dir):
         try:
             for name in os.listdir(resolved_db_dir):
-                if name.endswith((".cvd", ".cld")):
+                if name.endswith(_CLAMAV_DB_EXTS):
                     full = os.path.join(resolved_db_dir, name)
                     if os.path.isfile(full) and os.path.getsize(full) > 0:
                         db_files.append(name)
