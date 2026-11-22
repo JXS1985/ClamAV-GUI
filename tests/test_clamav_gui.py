@@ -213,10 +213,20 @@ class TestFormattingAndParsers(unittest.TestCase):
             home = Path(tmpdir) / "userhome"
             (home / "Downloads").mkdir(parents=True)
             (home / "Schreibtisch").mkdir(parents=True)
-            targets = app_mod.get_quick_scan_targets(str(home))
-            self.assertIn(str(home / "Downloads"), targets)
-            self.assertIn(str(home / "Schreibtisch"), targets)
-            self.assertIn("/tmp", targets)
+            folders = [str(home / "Downloads"), str(home / "Schreibtisch")]
+            path_exists = os.path.exists
+            for tmp_exists in (False, True):
+                with (
+                    self.subTest(tmp_exists=tmp_exists),
+                    mock.patch(
+                        "os.path.exists",
+                        side_effect=lambda path: tmp_exists if path == "/tmp" else path_exists(path),
+                    ),
+                ):
+                    self.assertCountEqual(
+                        app_mod.get_quick_scan_targets(str(home)),
+                        [*folders, "/tmp"] if tmp_exists else folders,
+                    )
 
             empty_home = Path(tmpdir) / "emptyhome"
             empty_home.mkdir()

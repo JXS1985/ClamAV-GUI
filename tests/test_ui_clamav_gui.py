@@ -742,7 +742,8 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 ):
                     QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
                 mock_msg_exec.assert_not_called()
-                self.assertEqual(Path(calls[0][1]["cmd_args"][-1]), sub_dir)
+                # Qt can expand short Windows paths when it returns a selection.
+                self.assertTrue(sub_dir.samefile(calls[0][1]["cmd_args"][-1]))
 
                 # 2. Highlight a file and click Open -> scans that file immediately; accept() on folder navigates into it
                 calls.clear()
@@ -751,7 +752,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                     _wait_and_select(dlg, "pick_folder")
                     dlg.accept()  # type: ignore[attr-defined]
                     self.win._qt_app.processEvents()
-                    self.assertEqual(Path(dlg.directory().absolutePath()), sub_dir)  # type: ignore[attr-defined]
+                    self.assertTrue(sub_dir.samefile(dlg.directory().absolutePath()))  # type: ignore[attr-defined]
 
                     _wait_and_select(dlg, "pick_file.txt")
                     dlg._open_btn.click()  # type: ignore[attr-defined]
@@ -763,7 +764,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 ):
                     QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
                 mock_msg_exec.assert_not_called()
-                self.assertEqual(Path(calls[0][1]["cmd_args"][-1]), sample_file)
+                self.assertTrue(sample_file.samefile(calls[0][1]["cmd_args"][-1]))
 
     @unittest.skipIf(sys.platform != "linux", "POSIX signal test")
     @mock.patch.object(app_mod, "start_background_precount", return_value={})
@@ -1528,7 +1529,9 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             ):
                 self.win.dropEvent(ev_drop)
             mock_launch.assert_called_once()
-            self.assertEqual([Path(target) for target in mock_launch.call_args[0][0]], [f1])
+            targets = mock_launch.call_args[0][0]
+            self.assertEqual(len(targets), 1)
+            self.assertTrue(f1.samefile(targets[0]))
             self.assertIn("suspect1.exe", mock_launch.call_args[1]["label"])
 
             # Dropping >5 files truncates preview with dlg_drop_more
@@ -1945,7 +1948,7 @@ class TestUILiveClamAV(unittest.TestCase, _UIEnvMixin):
             summaries = app_mod.parse_scan_summaries_from_log(log_text)
             self.assertEqual([entry["threats"] for entry in summaries], [1], log_text)
             self.assertEqual(self.win.threats_table.rowCount(), 1, log_text)
-            self.assertEqual(Path(self.win.threats_table.item(0, 0).text()), sample)
+            self.assertTrue(sample.samefile(self.win.threats_table.item(0, 0).text()))
             self.assertIn(signature, self.win.threats_table.item(0, 1).text())
             self.win.threats_table.selectRow(0)
             self.win._quarantine_selected_threat()
