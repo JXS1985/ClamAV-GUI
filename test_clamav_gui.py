@@ -596,7 +596,8 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
                 import getpass
 
                 cur_user = getpass.getuser()
-                p_res = app_mod._helper_install_polkit_rule({"username": cur_user})
+                with mock.patch("os.geteuid", return_value=1000):
+                    p_res = app_mod._helper_install_polkit_rule({"username": cur_user})
                 rule_txt = Path(p_res["rule_path"]).read_text(encoding="utf-8")
                 self.assertIn(f'subject.user == {json.dumps(cur_user)}', rule_txt)
                 self.assertIn("org.freedesktop.policykit.exec", rule_txt)
@@ -955,7 +956,8 @@ class TestSecurityHardening(unittest.TestCase):
                 import getpass
 
                 cur = getpass.getuser()
-                res = app_mod._helper_install_polkit_rule({"username": cur})
+                with mock.patch("os.geteuid", return_value=1000):
+                    res = app_mod._helper_install_polkit_rule({"username": cur})
                 content = Path(res["rule_path"]).read_text(encoding="utf-8")
                 self.assertIn("subject.active && subject.local", content)
             finally:
@@ -1240,7 +1242,7 @@ class TestScheduleAndCancellation(unittest.TestCase):
             f2.write_bytes(b"second")
             f3.write_bytes(b"third")
 
-            with mock.patch("datetime.datetime") as mock_dt:
+            with mock.patch("datetime.datetime") as mock_dt, mock.patch("os.geteuid", return_value=1000):
                 mock_dt.now.return_value = fixed_now
                 r1 = app_mod._helper_quarantine_file({"path": str(f1), "quarantine_dir": str(qdir)})
                 r2 = app_mod._helper_quarantine_file({"path": str(f2), "quarantine_dir": str(qdir)})
@@ -1257,7 +1259,7 @@ class TestScheduleAndCancellation(unittest.TestCase):
             real_target_dir.mkdir()
             sym_parent = root / "sym_link"
             sym_parent.symlink_to(real_target_dir)
-            with self.assertRaises(PermissionError):
+            with mock.patch("os.geteuid", return_value=1000), self.assertRaises(PermissionError):
                 app_mod._helper_restore_quarantine(
                     {
                         "name": r1["name"],

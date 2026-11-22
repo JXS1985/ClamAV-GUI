@@ -7076,6 +7076,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self._unlock_pkexec()
             return False
 
+        def _reset_after_scan_exit(self, pid: int) -> None:
+            cancel_background_precount()
+            self._last_active_scan = None
+            self._pending_scan_labels.pop(pid, None)
+            self._clear_scan_telemetry()
+            self._poll_tick()
+            self._compact_window_if_idle()
+
         def _toggle_pause_scan(self) -> None:
             proc = self._current_proc
             if not proc:
@@ -7089,7 +7097,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                         return
                     self.helper.call("signal_proc", {"pid": proc["pid"], "sig": sig})
                 self._poll_tick()
+            except ProcessLookupError:
+                self._reset_after_scan_exit(proc["pid"])
             except Exception as exc:  # noqa: BLE001
+                if "no longer exists" in str(exc).lower():
+                    self._reset_after_scan_exit(proc["pid"])
+                    return
                 QMessageBox.warning(self, self._tr("dlg_sig_err"), str(exc))
 
         def _stop_scan(self) -> None:
@@ -7111,13 +7124,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     if not self._require_root_helper():
                         return
                     self.helper.call("signal_proc", {"pid": stopped_pid, "sig": "SIGTERM"})
-                cancel_background_precount()
-                self._last_active_scan = None
-                self._pending_scan_labels.pop(stopped_pid, None)
-                self._clear_scan_telemetry()
-                self._poll_tick()
-                self._compact_window_if_idle()
+                self._reset_after_scan_exit(stopped_pid)
+            except ProcessLookupError:
+                self._reset_after_scan_exit(proc["pid"])
             except Exception as exc:  # noqa: BLE001
+                if "no longer exists" in str(exc).lower():
+                    self._reset_after_scan_exit(proc["pid"])
+                    return
                 QMessageBox.warning(self, self._tr("dlg_stop_err"), str(exc))
 
         def _on_bg_mode_clicked(self, checked: bool) -> None:

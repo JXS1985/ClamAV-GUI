@@ -588,6 +588,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
             mock.patch("os.path.exists", return_value=False),
             mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+            mock.patch("threading.Thread"),
         ):
             QTest.mouseClick(self.win.bg_mode_chk, Qt.MouseButton.LeftButton)
             prio_calls = [c for c in mock_call.call_args_list if c[0][0] == "set_priority"]
@@ -710,8 +711,8 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
         # Real end-to-end HelperClient + `--helper` subprocess spawning and canceling a live process
         import shutil
 
-        if not shutil.which("clamscan"):
-            self.skipTest("clamscan binary not installed on host")
+        has_clamscan = bool(shutil.which("clamscan"))
+        has_db = bool(app_mod.check_system_dependencies().get("has_virus_db"))
 
         client = app_mod.HelperClient()
         proc = subprocess.Popen(
@@ -730,7 +731,36 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             with (
                 mock.patch.object(self.win, "helper", client),
                 mock.patch.object(self.win, "_notify"),
+                mock.patch.object(QMessageBox, "warning"),
             ):
+                if not has_clamscan or not has_db:
+                    ping_res = client.call("ping", {}, timeout=5.0)
+                    self.assertEqual(ping_res["pid"], proc.pid)
+                    insp_res = client.call("inspect_proc", {"pid": None, "log_path": "", "log_offset": 0}, timeout=5.0)
+                    self.assertFalse(insp_res["proc"]["alive"])
+
+                    paused = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    try:
+                        time.sleep(0.1)
+                        os.kill(paused.pid, signal.SIGSTOP)
+                        deadline = time.monotonic() + 1.0
+                        while time.monotonic() < deadline:
+                            st = app_mod.parse_proc_stat(paused.pid)
+                            if st and st["state"] == "T":
+                                break
+                            time.sleep(0.02)
+                        app_mod._terminate_pid_gracefully(paused.pid, force_cont=True)
+                        self.assertIsNotNone(paused.wait(timeout=1.0))
+                    finally:
+                        if paused.poll() is None:
+                            paused.kill()
+                            paused.wait(timeout=1.0)
+                    return
+
                 # Launch real clamscan against /usr/share via Quick/Custom helper flow
                 res = client.call("start_scan", {"cmd_args": ["clamscan", "-r", "/usr/share"], "log_path": ""}, timeout=5.0)
                 real_pid = int(res["pid"])

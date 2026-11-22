@@ -42,13 +42,12 @@ jobs:
             pkg_type: rpm
             rpm_flavor: fedora
             dist_tag: fc45
-          # Ubuntu runner disabled for now (GNOME support comes later)
-          # - id: ubuntu-26.04
-          #   name: Ubuntu 26.04
-          #   pkg_mgr: apt
-          #   pkg_type: deb
-          #   rpm_flavor: none
-          #   dist_tag: ubuntu2604
+          - id: ubuntu-26.04
+            name: Ubuntu 26.04
+            pkg_mgr: apt
+            pkg_type: deb
+            rpm_flavor: none
+            dist_tag: ubuntu2604
           - id: kubuntu-26.04
             name: Kubuntu 26.04
             pkg_mgr: apt
@@ -59,7 +58,15 @@ jobs:
           - kde
           - gnome
         exclude:
-          # Kubuntu is KDE-only (ubuntu-26.04 runner remains disabled until needed)
+          # Ubuntu Desktop runs GNOME-only; Kubuntu runs KDE-only
+          - distro:
+              id: ubuntu-26.04
+              name: Ubuntu 26.04
+              pkg_mgr: apt
+              pkg_type: deb
+              rpm_flavor: none
+              dist_tag: ubuntu2604
+            desktop: kde
           - distro:
               id: kubuntu-26.04
               name: Kubuntu 26.04
@@ -70,10 +77,10 @@ jobs:
             desktop: gnome
 
     # Active Gitea act_runner targets (opensuse-16, opensuse-16.1, opensuse-tumbleweed,
-    # rocky-10, fedora-45 on kde & gnome; kubuntu-26.04 on kde):
+    # rocky-10, fedora-45 on kde & gnome; ubuntu-26.04 on gnome; kubuntu-26.04 on kde):
     #   opensuse-16-kde, opensuse-16-gnome, opensuse-16.1-kde, opensuse-16.1-gnome,
     #   opensuse-tumbleweed-kde, opensuse-tumbleweed-gnome, rocky-10-kde, rocky-10-gnome,
-    #   fedora-45-kde, fedora-45-gnome, kubuntu-26.04-kde
+    #   fedora-45-kde, fedora-45-gnome, ubuntu-26.04-gnome, kubuntu-26.04-kde
     runs-on: ${{ matrix.distro.id }}-${{ matrix.desktop }}
 
     env:
@@ -152,7 +159,8 @@ jobs:
                 || DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends python3-pyqt6 \
                 || true
               if [ "${TARGET_DESKTOP}" = "gnome" ]; then
-                DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends xdg-desktop-portal-gtk || true
+                DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
+                  xdg-desktop-portal-gtk adwaita-icon-theme python3-gi gir1.2-glib-2.0 || true
               else
                 DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends xdg-desktop-portal-kde || true
               fi

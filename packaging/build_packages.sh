@@ -93,7 +93,7 @@ Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen überwachen und steuer
 Exec=/usr/bin/clamav-security-center
 Icon=clamav-kde-gui
 Terminal=false
-Categories=System;Security;Qt;KDE;GNOME;
+Categories=System;Security;Qt;GTK;KDE;GNOME;
 StartupWMClass=clamav-kde-gui
 EOF
   chmod 0644 "${dest}"

@@ -8,5 +8,5 @@ Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen auf KDE Plasma und GNO
 Exec=/home/schneider/Downloads/Clamav/run.sh
 Icon=clamav-kde-gui
 Terminal=false
-Categories=System;Security;Qt;KDE;GNOME;
+Categories=System;Security;Qt;GTK;KDE;GNOME;
 StartupWMClass=clamav-kde-gui
