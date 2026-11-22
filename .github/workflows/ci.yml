@@ -128,7 +128,7 @@ jobs:
 
           case "${PKG_MGR}" in
             zypper)
-              ${SUDO} zypper --non-interactive refresh
+              ${SUDO} sh .github/scripts/refresh-zypper.sh "${DIST_TAG}"
               ${SUDO} zypper --non-interactive install --no-recommends -y \
                 python3 python3-pyside6 clamav findutils util-linux polkit procps \
                 libnotify-tools rpm-build desktop-file-utils xvfb-run glib2-tools tar gzip

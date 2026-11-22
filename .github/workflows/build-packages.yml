@@ -162,7 +162,7 @@ jobs:
           fi
           case "${PKG_MGR}" in
             zypper)
-              ${SUDO} zypper --non-interactive refresh
+              ${SUDO} sh .github/scripts/refresh-zypper.sh "${DIST_TAG}"
               ${SUDO} zypper --non-interactive install --no-recommends -y \
                 rpm-build desktop-file-utils python3 tar gzip
               ;;
