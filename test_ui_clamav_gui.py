@@ -80,6 +80,7 @@ class _UIEnvMixin:
         cls._tmp_dir.cleanup()
 
     def _reset_window_state(self) -> None:
+        app_mod.cancel_background_precount()
         self.win._current_proc = None
         self.win._known_procs = []
         self.win._last_active_scan = None
@@ -1053,7 +1054,16 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
                         return app_mod.HELPER_HANDLERS[action](params or {})
 
                 # Unconnected save attempts to elevate via _require_root_helper
+                self.win.show()
                 self.win._open_tab(4)
+                self.win._qt_app.processEvents()
+                self.assertGreaterEqual(self.win.sched_status_lbl.width(), 450)
+                req_h1 = (
+                    self.win.sched_status_lbl.heightForWidth(self.win.sched_status_lbl.width())
+                    if self.win.sched_status_lbl.hasHeightForWidth()
+                    else self.win.sched_status_lbl.sizeHint().height()
+                )
+                self.assertGreaterEqual(self.win.sched_status_lbl.height(), req_h1)
                 with mock.patch.object(self.win, "_require_root_helper", return_value=False) as mock_req:
                     QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
                     mock_req.assert_called_once()
@@ -1070,10 +1080,18 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
                     self.win.sched_day_combo.setCurrentIndex(self.win.sched_day_combo.findData("Wed"))
                     self.win.sched_time_edit.setTime(QTime(6, 15))
                     QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+                    self.win._qt_app.processEvents()
 
                     self.assertTrue(tmr.exists())
                     self.assertEqual(self.win.card_threats.value_lbl.text(), "Wed 06:15")
                     self.assertIn("Enabled", self.win.sched_status_lbl.text())
+                    self.assertGreaterEqual(self.win.sched_status_lbl.width(), 450)
+                    req_h2 = (
+                        self.win.sched_status_lbl.heightForWidth(self.win.sched_status_lbl.width())
+                        if self.win.sched_status_lbl.hasHeightForWidth()
+                        else self.win.sched_status_lbl.sizeHint().height()
+                    )
+                    self.assertGreaterEqual(self.win.sched_status_lbl.height(), req_h2)
 
                     # Disabling schedule resets Home Schedule card back to "Not scheduled" even while unit file exists
                     self.win.sched_enabled_chk.setChecked(False)

@@ -3915,7 +3915,12 @@ def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
         )
         out = list_res.stdout.strip()
         if out:
-            next_run = out.splitlines()[0]
+            first_line = out.splitlines()[0].strip()
+            m_next = re.match(
+                r"^([A-Za-z]{3}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[A-Za-z0-9+-]+)?)",
+                first_line,
+            )
+            next_run = m_next.group(1) if m_next else first_line
 
     return {"enabled": enabled, "next_run": next_run, **cfg}
 
@@ -4579,6 +4584,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QProgressBar,
             QPushButton,
             QScrollArea,
+            QSizePolicy,
             QSpinBox,
             QSystemTrayIcon,
             QTableWidget,
@@ -4626,6 +4632,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QProgressBar,
             QPushButton,
             QScrollArea,
+            QSizePolicy,
             QSpinBox,
             QSystemTrayIcon,
             QTableWidget,
@@ -5806,10 +5813,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             desc = self._reg_text(QLabel(), "sched_desc")
             desc.setWordWrap(True)
-            desc.setStyleSheet("color: palette(placeholderText);")
+            desc.setStyleSheet("color: palette(placeholderText);" if self._dark else "color: #475569;")
             layout.addWidget(desc)
 
             form = QFormLayout()
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            form.setHorizontalSpacing(14)
+            form.setVerticalSpacing(5)
             self.sched_enabled_chk = self._reg_text(QCheckBox(), "sched_enable_chk")
             form.addRow(self._reg_text(QLabel(), "sched_status_lbl"), self.sched_enabled_chk)
 
@@ -5844,7 +5854,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             self.sched_status_lbl = QLabel(self._tr("sched_unlock_hint"))
             self.sched_status_lbl.setWordWrap(True)
-            self.sched_status_lbl.setStyleSheet("color: palette(placeholderText);")
+            self.sched_status_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+            self.sched_status_lbl.setMinimumHeight(24)
+            self.sched_status_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.sched_status_lbl.setStyleSheet(
+                "color: #cbd5e1; font-weight: 500;" if self._dark else "color: #334155; font-weight: 500;"
+            )
             form.addRow(self._reg_text(QLabel(), "sched_info_lbl"), self.sched_status_lbl)
             layout.addLayout(form)
 
