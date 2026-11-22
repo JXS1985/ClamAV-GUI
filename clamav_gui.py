@@ -5598,6 +5598,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._bottom_spacer.setVisible(not checked)
             if self.centralWidget() and self.centralWidget().layout():
                 self.centralWidget().layout().activate()
+            if self.layout():
+                self.layout().activate()
             if checked:
                 self.toggle_tabs_btn.setText(self._tr("hide_tabs_btn"))
                 target_h = max(840, self.minimumSizeHint().height())
@@ -6214,10 +6216,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     else "#AuthBanner { border: 1px solid #b45309; border-radius: 10px; "
                     "background-color: rgba(180, 83, 9, 0.14); }"
                 )
-            if not self.toggle_tabs_btn.isChecked() and self._current_proc is None:
-                if self.centralWidget() and self.centralWidget().layout():
-                    self.centralWidget().layout().activate()
-                self.resize(self.width(), max(460, self.minimumSizeHint().height()))
+            self._compact_window_if_idle()
 
         def _update_hero_banner(self, proc: dict[str, Any] | None) -> None:
             threats = self.threats_table.rowCount()
@@ -6460,11 +6459,30 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._update_hero_banner(self._current_proc)
             self._update_tray_status(self._current_proc)
 
+        def _apply_compact_idle_size(self) -> None:
+            if self.toggle_tabs_btn.isChecked() or self._current_proc is not None:
+                return
+            for child in (
+                self.card_status,
+                self.card_cpu,
+                self.card_io,
+                self.card_threats,
+                self.stats_strip,
+                self.hero_banner,
+            ):
+                if child.layout():
+                    child.layout().activate()
+            if self.centralWidget() and self.centralWidget().layout():
+                self.centralWidget().layout().activate()
+            if self.layout():
+                self.layout().activate()
+            self.resize(self.width(), max(460, self.minimumSizeHint().height()))
+
         def _compact_window_if_idle(self) -> None:
-            if not self.toggle_tabs_btn.isChecked() and self._current_proc is None:
-                if self.centralWidget() and self.centralWidget().layout():
-                    self.centralWidget().layout().activate()
-                self.resize(self.width(), max(460, self.minimumSizeHint().height()))
+            if self.toggle_tabs_btn.isChecked() or self._current_proc is not None:
+                return
+            self._apply_compact_idle_size()
+            QTimer.singleShot(0, self._apply_compact_idle_size)
 
         def _clear_scan_telemetry(self) -> None:
             self.telemetry.selected_pid = None

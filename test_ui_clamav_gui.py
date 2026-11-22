@@ -614,6 +614,8 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(self.win.history_table.item(0, 5).text(), "Clean")
 
     def test_start_and_cancel_running_and_paused_job_returns_to_start(self) -> None:
+        self.win._qt_app.processEvents()
+        idle_h = self.win.height()
         # 1. Start a job -> active scanning state with elapsed time advancing
         active_proc = {
             "pid": 8282,
@@ -641,7 +643,9 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
 
         self.assertTrue(any(c[0][0] == "start_scan" for c in mock_call.call_args_list))
         self.assertIsNotNone(self.win._current_proc)
+        self.win._qt_app.processEvents()
         self.assertFalse(self.win.ctrl_box.isHidden())
+        self.assertGreater(self.win.height(), idle_h + 100)
         self.assertEqual(self.win.card_status.value_lbl.text(), "RUNNING")
         self.assertEqual(self.win.card_cpu.value_lbl.text(), "00:00:03")
 
@@ -669,10 +673,12 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             mock_stop_call.assert_called_with("signal_proc", {"pid": 8282, "sig": "SIGTERM"})
             mock_cancel_pre.assert_called()
 
+        self.win._qt_app.processEvents()
         self.assertIsNone(self.win._current_proc)
         self.assertIsNone(self.win._last_active_scan)
         self.assertIsNone(self.win.telemetry.selected_pid)
         self.assertTrue(self.win.ctrl_box.isHidden())
+        self.assertEqual(self.win.height(), idle_h)
         self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
         self.assertEqual(self.win.card_status.value_lbl.text(), "Protected")
         self.assertEqual(self.win.card_cpu.title_lbl.text(), self.win._tr("idle_col_last_scan"))
@@ -704,6 +710,26 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(self.win.telemetry.last_proc_data, {})
         self.assertEqual(self.win.telemetry.last_precount, {})
         self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
+
+        # 4. Natural scan completion via _poll_tick also shrinks the expanded window back down
+        with (
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[dict(active_proc)]),
+            mock.patch("threading.Thread"),
+        ):
+            self.win._poll_tick()
+            self.win._qt_app.processEvents()
+        running_h = self.win.height()
+        self.assertGreater(running_h, idle_h + 100)
+
+        with (
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+            mock.patch.object(self.win, "_notify"),
+            mock.patch("threading.Thread"),
+        ):
+            self.win._poll_tick()
+            self.win._qt_app.processEvents()
+        self.assertTrue(self.win.ctrl_box.isHidden())
+        self.assertLess(self.win.height(), running_h - 100)
 
     def test_start_pause_then_cancel_real_helper_subprocess(self) -> None:
         # Real end-to-end HelperClient + `--helper` subprocess spawning and canceling a live process
