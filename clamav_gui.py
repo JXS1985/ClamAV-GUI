@@ -4566,6 +4566,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QApplication,
             QCheckBox,
             QComboBox,
+            QDialog,
+            QDialogButtonBox,
             QFileDialog,
             QFormLayout,
             QFrame,
@@ -4577,6 +4579,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QInputDialog,
             QLabel,
             QLineEdit,
+            QListView,
             QMainWindow,
             QMenu,
             QMessageBox,
@@ -4591,6 +4594,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QTableWidgetItem,
             QTabWidget,
             QTimeEdit,
+            QTreeView,
             QVBoxLayout,
             QWidget,
         )
@@ -4614,6 +4618,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QApplication,
             QCheckBox,
             QComboBox,
+            QDialog,
+            QDialogButtonBox,
             QFileDialog,
             QFormLayout,
             QFrame,
@@ -4625,6 +4631,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QInputDialog,
             QLabel,
             QLineEdit,
+            QListView,
             QMainWindow,
             QMenu,
             QMessageBox,
@@ -4639,6 +4646,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             QTableWidgetItem,
             QTabWidget,
             QTimeEdit,
+            QTreeView,
             QVBoxLayout,
             QWidget,
         )
@@ -5036,6 +5044,90 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.value_lbl.setStyleSheet(f"color: {color};")
             else:
                 self.value_lbl.setStyleSheet("" if self._dark else "color: #111827;")
+
+    class FileOrFolderPickerDialog(QFileDialog):
+        """File browser allowing immediate selection of either files or folders."""
+
+        def __init__(self, parent: QWidget | None = None, caption: str = "", directory: str = "") -> None:
+            super().__init__(parent, caption, directory)
+            self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+            self.setFileMode(QFileDialog.FileMode.ExistingFiles)
+            self.chosen_paths: list[str] = []
+
+            self._lv = self.findChild(QListView, "listView")
+            self._tv = self.findChild(QTreeView, "treeView")
+            self._edit = self.findChild(QLineEdit, "fileNameEdit")
+            self._bbox = self.findChild(QDialogButtonBox)
+            self._open_btn = self._bbox.button(QDialogButtonBox.StandardButton.Open) if self._bbox else None
+
+            for view in (self._lv, self._tv):
+                if view is not None and view.selectionModel() is not None:
+                    view.selectionModel().selectionChanged.connect(self._sync_selection)
+            self.directoryEntered.connect(self._on_directory_entered)
+            if self._open_btn is not None:
+                try:
+                    self._open_btn.clicked.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                self._open_btn.clicked.connect(self._accept_current_selection)
+                self._open_btn.setEnabled(True)
+
+        def _on_directory_entered(self, _directory: str) -> None:
+            if self._edit is not None:
+                self._edit.clear()
+            self._sync_selection()
+
+        def _current_view_paths(self) -> list[str]:
+            base = self.directory().absolutePath()
+            for view in (self._lv, self._tv):
+                if view is not None and view.isVisible() and view.selectionModel() is not None:
+                    rows = view.selectionModel().selectedRows(0)
+                    if not rows:
+                        rows = [idx for idx in view.selectionModel().selectedIndexes() if idx.column() == 0]
+                    if rows:
+                        model = view.model()
+                        out: list[str] = []
+                        for idx in rows:
+                            path = ""
+                            if model is not None and hasattr(model, "filePath"):
+                                path = str(model.filePath(idx) or "").strip()
+                            if not path and model is not None:
+                                name = str(model.data(idx) or "").strip()
+                                if name:
+                                    path = os.path.join(base, name)
+                            if path:
+                                out.append(path)
+                        if out:
+                            return out
+            return []
+
+        def _sync_selection(self, *_args: Any) -> None:
+            paths = self._current_view_paths()
+            if self._edit is not None and len(paths) == 1:
+                self._edit.setText(os.path.basename(paths[0]) or paths[0])
+            if self._open_btn is not None:
+                self._open_btn.setEnabled(True)
+
+        def _accept_current_selection(self) -> None:
+            paths = self._current_view_paths()
+            if not paths and self._edit is not None:
+                typed = self._edit.text().strip()
+                if typed and not typed.startswith('"'):
+                    candidate = typed if os.path.isabs(typed) else os.path.join(self.directory().absolutePath(), typed)
+                    if os.path.exists(candidate):
+                        paths = [os.path.abspath(candidate)]
+            if not paths:
+                files = [p for p in self.selectedFiles() if p and os.path.exists(p)]
+                paths = files if files else [self.directory().absolutePath()]
+            self.chosen_paths = paths
+            QDialog.accept(self)
+
+        def accept(self) -> None:
+            paths = self._current_view_paths()
+            if len(paths) == 1 and os.path.isdir(paths[0]):
+                self.setDirectory(paths[0])
+                return
+            self._accept_current_selection()
 
     class ClamAVMainWindow(QMainWindow):
         def __init__(self, auto_poll: bool = True, initial_lang: str | None = None) -> None:
@@ -7614,30 +7706,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._launch_scan_args(["/"], label=self._tr("label_full_scan"), exclude_virtual=True)
 
         def _start_custom_picker_scan(self) -> None:
-            box = QMessageBox(self)
-            box.setWindowTitle(self._tr("dlg_pick_title"))
-            box.setText(self._tr("dlg_pick_msg"))
-            btn_folder = box.addButton(self._tr("dlg_pick_folder"), QMessageBox.ButtonRole.AcceptRole)
-            btn_file = box.addButton(self._tr("dlg_pick_file"), QMessageBox.ButtonRole.ActionRole)
-            box.addButton(QMessageBox.StandardButton.Cancel)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked == btn_folder:
-                chosen = QFileDialog.getExistingDirectory(
-                    self, self._tr("dlg_pick_folder_title"), os.path.expanduser("~")
-                )
-            elif clicked == btn_file:
-                chosen, _ = QFileDialog.getOpenFileName(
-                    self, self._tr("dlg_pick_file_title"), os.path.expanduser("~")
-                )
-            else:
+            dlg = FileOrFolderPickerDialog(self, self._tr("dlg_pick_title"), os.path.expanduser("~"))
+            if dlg.exec() != int(QDialog.DialogCode.Accepted):
                 return
-            if chosen:
-                self._launch_scan_args(
-                    [chosen],
-                    label=self._tr("label_custom_scan", target=os.path.basename(chosen) or chosen),
-                    exclude_virtual=(chosen == "/"),
-                )
+            targets = dlg.chosen_paths or [p for p in dlg.selectedFiles() if p]
+            if not targets:
+                return
+            first_name = os.path.basename(targets[0]) or targets[0]
+            target_desc = first_name if len(targets) == 1 else f"{first_name} (+{len(targets) - 1})"
+            self._launch_scan_args(
+                targets,
+                label=self._tr("label_custom_scan", target=target_desc),
+                exclude_virtual=("/" in targets),
+            )
 
         def _start_new_scan(self) -> None:
             args, log_path = self._build_scan_command()

@@ -21,16 +21,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import clamav_gui as app_mod  # noqa: E402
 
 try:
-    from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QTime, QUrl
+    from PySide6.QtCore import QItemSelectionModel, QMimeData, QPoint, QPointF, Qt, QTime, QUrl
     from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QPushButton, QSystemTrayIcon
+    from PySide6.QtWidgets import (
+        QApplication,
+        QDialog,
+        QFileDialog,
+        QInputDialog,
+        QMessageBox,
+        QPushButton,
+        QSystemTrayIcon,
+    )
 except ImportError:
-    from PyQt6.QtCore import QMimeData, QPoint, QPointF, Qt, QTime, QUrl  # type: ignore[no-redef]
+    from PyQt6.QtCore import QItemSelectionModel, QMimeData, QPoint, QPointF, Qt, QTime, QUrl  # type: ignore[no-redef]
     from PyQt6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent  # type: ignore[no-redef]
     from PyQt6.QtTest import QTest  # type: ignore[no-redef]
     from PyQt6.QtWidgets import (  # type: ignore[no-redef]
         QApplication,
+        QDialog,
         QFileDialog,
         QInputDialog,
         QMessageBox,
@@ -510,21 +519,75 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             self.assertIn("--exclude-dir=^/proc", full_args)
             self.assertEqual(full_args[-1], "/")
 
-            # Folder/File picker scan -> Folder choice
-            calls.clear()
-            fake_btn = QPushButton("Folder")
+            # Direct file/folder browser picker (no intermediate QMessageBox menu)
+            with tempfile.TemporaryDirectory() as pick_tmp:
+                tmp_root = Path(pick_tmp)
+                sub_dir = tmp_root / "pick_folder"
+                sub_dir.mkdir()
+                sample_file = tmp_root / "pick_file.txt"
+                sample_file.write_text("clean", encoding="utf-8")
 
-            def fake_add_button(text_or_std: object, *_a: object) -> object:
-                return fake_btn if text_or_std == "Choose Folder..." else QPushButton("Other")
+                def _wait_and_select(dlg: object, entry_name: str) -> None:
+                    dlg.setDirectory(str(tmp_root))  # type: ignore[attr-defined]
+                    dlg.show()  # type: ignore[attr-defined]
+                    lv = dlg._lv  # type: ignore[attr-defined]
+                    model = lv.model()
+                    target_idx = None
+                    for _ in range(50):
+                        self.win._qt_app.processEvents()
+                        root_idx = lv.rootIndex()
+                        for row in range(model.rowCount(root_idx)):
+                            idx = model.index(row, 0, root_idx)
+                            if model.data(idx) == entry_name:
+                                target_idx = idx
+                                break
+                        if target_idx is not None:
+                            break
+                        time.sleep(0.02)
+                    self.assertIsNotNone(target_idx, f"Entry {entry_name!r} did not load in picker")
+                    lv.selectionModel().select(
+                        target_idx,
+                        QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+                    )
+                    self.win._qt_app.processEvents()
 
-            with (
-                mock.patch.object(QMessageBox, "addButton", side_effect=fake_add_button),
-                mock.patch.object(QMessageBox, "exec", return_value=0),
-                mock.patch.object(QMessageBox, "clickedButton", return_value=fake_btn),
-                mock.patch.object(QFileDialog, "getExistingDirectory", return_value="/tmp"),
-            ):
-                QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
-            self.assertEqual(calls[0][1]["cmd_args"][-1], "/tmp")
+                # 1. Highlight a folder and click Open -> scans that folder immediately; QMessageBox not shown
+                calls.clear()
+
+                def pick_folder_exec(dlg: object) -> int:
+                    _wait_and_select(dlg, "pick_folder")
+                    self.assertTrue(dlg._open_btn.isEnabled())  # type: ignore[attr-defined]
+                    dlg._open_btn.click()  # type: ignore[attr-defined]
+                    return int(dlg.result())  # type: ignore[attr-defined]
+
+                with (
+                    mock.patch.object(QMessageBox, "exec") as mock_msg_exec,
+                    mock.patch.object(QFileDialog, "exec", pick_folder_exec),
+                ):
+                    QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
+                mock_msg_exec.assert_not_called()
+                self.assertEqual(calls[0][1]["cmd_args"][-1], str(sub_dir))
+
+                # 2. Highlight a file and click Open -> scans that file immediately; accept() on folder navigates into it
+                calls.clear()
+
+                def pick_file_and_nav_exec(dlg: object) -> int:
+                    _wait_and_select(dlg, "pick_folder")
+                    dlg.accept()  # type: ignore[attr-defined]
+                    self.win._qt_app.processEvents()
+                    self.assertEqual(dlg.directory().absolutePath(), str(sub_dir))  # type: ignore[attr-defined]
+
+                    _wait_and_select(dlg, "pick_file.txt")
+                    dlg._open_btn.click()  # type: ignore[attr-defined]
+                    return int(dlg.result())  # type: ignore[attr-defined]
+
+                with (
+                    mock.patch.object(QMessageBox, "exec") as mock_msg_exec,
+                    mock.patch.object(QFileDialog, "exec", pick_file_and_nav_exec),
+                ):
+                    QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
+                mock_msg_exec.assert_not_called()
+                self.assertEqual(calls[0][1]["cmd_args"][-1], str(sample_file))
 
     def test_pause_stop_priority_and_restart_without_i(self) -> None:
         own_proc = {
