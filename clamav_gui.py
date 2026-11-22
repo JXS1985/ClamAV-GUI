@@ -44,6 +44,10 @@ QUARANTINE_MANIFEST = "manifest.json"
 POLKIT_RULE_PATH = "/etc/polkit-1/rules.d/49-clamav-kde-gui.rules"
 SYSTEMD_SERVICE_PATH = "/etc/systemd/system/clamav-gui-scan.service"
 SYSTEMD_TIMER_PATH = "/etc/systemd/system/clamav-gui-scan.timer"
+APP_VERSION = "1.0.0"
+APP_AUTHOR = "Armin Schneider (@JXS1985)"
+APP_GITHUB_URL = "https://github.com/JXS1985/ClamAV-GUI"
+APP_LICENSE = "GNU General Public License v3.0 (GPL-3.0)"
 APP_DATA_DIR = Path.home() / ".local" / "share" / "clamav-kde-gui"
 HISTORY_FILE_PATH = APP_DATA_DIR / "history.json"
 SETTINGS_FILE_PATH = APP_DATA_DIR / "settings.json"
@@ -67,6 +71,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "Detecting ClamAV...",
         "root_active_badge": "●  Protected Access Active",
         "quit_btn": "Quit",
+        "about_btn": "About",
+        "dlg_about_title": "About ClamAV Security Center",
+        "about_desc": "Open-source Linux desktop control center for ClamAV antivirus scanning, quarantine, and scheduled background protection.",
+        "about_version_lbl": "Version:",
+        "about_creator_lbl": "Creator:",
+        "about_license_lbl": "License:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "Unlock admin access once for passwordless scans, quarantine & schedules.",
         "unlock_sudo_btn": "Unlock Password...",
         "unlock_polkit_btn": "Unlock via Polkit",
@@ -340,6 +351,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "ClamAV wird erkannt...",
         "root_active_badge": "●  Geschützter Zugriff aktiv",
         "quit_btn": "Beenden",
+        "about_btn": "Über",
+        "dlg_about_title": "Über ClamAV Sicherheitszentrum",
+        "about_desc": "Open-Source-Desktop-Kontrollzentrum für Linux zur Verwaltung von ClamAV-Scans, Quarantäne und geplantem Hintergrundschutz.",
+        "about_version_lbl": "Version:",
+        "about_creator_lbl": "Ersteller:",
+        "about_license_lbl": "Lizenz:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "Admin-Zugriff einmalig freischalten für passwortlose Scans, Quarantäne & Zeitpläne.",
         "unlock_sudo_btn": "Passwort freischalten...",
         "unlock_polkit_btn": "Per Polkit freischalten",
@@ -613,6 +631,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "Detectando ClamAV...",
         "root_active_badge": "●  Acceso protegido activo",
         "quit_btn": "Salir",
+        "about_btn": "Acerca de",
+        "dlg_about_title": "Acerca de Centro de Seguridad ClamAV",
+        "about_desc": "Centro de control de código abierto para Linux con análisis ClamAV, cuarentena y protección programada en segundo plano.",
+        "about_version_lbl": "Versión:",
+        "about_creator_lbl": "Creador:",
+        "about_license_lbl": "Licencia:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "Desbloquee el acceso root una vez para análisis, cuarentena y programación.",
         "unlock_sudo_btn": "Contraseña...",
         "unlock_polkit_btn": "Desbloquear con Polkit",
@@ -886,6 +911,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "Détection de ClamAV...",
         "root_active_badge": "●  Accès protégé actif",
         "quit_btn": "Quitter",
+        "about_btn": "À propos",
+        "dlg_about_title": "À propos du Centre de sécurité ClamAV",
+        "about_desc": "Centre de contrôle open source pour Linux dédié aux analyses ClamAV, à la quarantaine et à la protection planifiée.",
+        "about_version_lbl": "Version :",
+        "about_creator_lbl": "Créateur :",
+        "about_license_lbl": "Licence :",
+        "about_github_lbl": "GitHub :",
         "auth_banner_text": "Déverrouillez l'accès root une fois pour analyses, quarantaine et planifications.",
         "unlock_sudo_btn": "Mot de passe...",
         "unlock_polkit_btn": "Via Polkit",
@@ -1159,6 +1191,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "Detectando ClamAV...",
         "root_active_badge": "●  Acesso protegido ativo",
         "quit_btn": "Sair",
+        "about_btn": "Sobre",
+        "dlg_about_title": "Sobre a Central de Segurança ClamAV",
+        "about_desc": "Central de controle de código aberto para Linux com verificações ClamAV, quarentena e proteção agendada em segundo plano.",
+        "about_version_lbl": "Versão:",
+        "about_creator_lbl": "Criador:",
+        "about_license_lbl": "Licença:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "Desbloqueie o acesso root uma vez para verificações, quarentena e agendamentos.",
         "unlock_sudo_btn": "Senha...",
         "unlock_polkit_btn": "Via Polkit",
@@ -1432,6 +1471,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "正在检测 ClamAV...",
         "root_active_badge": "●  受保护访问已启用",
         "quit_btn": "退出",
+        "about_btn": "关于",
+        "dlg_about_title": "关于 ClamAV 安全中心",
+        "about_desc": "面向 Linux 的开源桌面安全控制中心，提供 ClamAV 病毒扫描、隔离管理与后台定时防护。",
+        "about_version_lbl": "版本：",
+        "about_creator_lbl": "作者：",
+        "about_license_lbl": "许可证：",
+        "about_github_lbl": "GitHub：",
         "auth_banner_text": "解锁一次管理员权限，即可启用免密扫描、隔离与定时任务。",
         "unlock_sudo_btn": "密码解锁...",
         "unlock_polkit_btn": "Polkit 解锁",
@@ -1705,6 +1751,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "ClamAV を検出中...",
         "root_active_badge": "●  保護アクセス有効",
         "quit_btn": "終了",
+        "about_btn": "概要",
+        "dlg_about_title": "ClamAV セキュリティセンターについて",
+        "about_desc": "ClamAV スキャン、隔離、定期バックグラウンド保護を行うオープンソースの Linux デスクトップ管理ツールです。",
+        "about_version_lbl": "バージョン:",
+        "about_creator_lbl": "作成者:",
+        "about_license_lbl": "ライセンス:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "管理者アクセスを解除すると、隔離やスケジュール管理が有効になります。",
         "unlock_sudo_btn": "パスワード解除...",
         "unlock_polkit_btn": "Polkit で解除",
@@ -1978,6 +2031,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "detecting_clamav": "Поиск ClamAV...",
         "root_active_badge": "●  Защищённый доступ активен",
         "quit_btn": "Выход",
+        "about_btn": "О программе",
+        "dlg_about_title": "О программе Центр безопасности ClamAV",
+        "about_desc": "Центр управления с открытым исходным кодом для Linux: проверка ClamAV, карантин и фоновая защита по расписанию.",
+        "about_version_lbl": "Версия:",
+        "about_creator_lbl": "Автор:",
+        "about_license_lbl": "Лицензия:",
+        "about_github_lbl": "GitHub:",
         "auth_banner_text": "Откройте root-доступ один раз для проверок, карантина и расписания.",
         "unlock_sudo_btn": "Пароль...",
         "unlock_polkit_btn": "Через Polkit",
@@ -5168,6 +5228,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._pending_scan_labels: dict[int, str] = {}
             self._last_meta: dict[str, Any] = {}
             self._log_reload_error: str = ""
+            self._last_about_dialog: QDialog | None = None
 
             self.helper.on_disconnect = self.signals.helper_disconnected.emit
             self.signals.pkexec_done.connect(self._on_pkexec_done)
@@ -5297,6 +5358,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             menu.addAction(self.tray_stop_act)
 
             menu.addSeparator()
+            self.tray_about_act = QAction(self._tr("about_btn"), self)
+            self.tray_about_act.triggered.connect(self._show_about_dialog)
+            menu.addAction(self.tray_about_act)
             self.tray_quit_act = QAction(self._tr("quit_btn"), self)
             self.tray_quit_act.triggered.connect(self._quit_app)
             menu.addAction(self.tray_quit_act)
@@ -5399,15 +5463,22 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.root_badge_lbl.setVisible(False)
             header_row.addWidget(self.root_badge_lbl)
 
-            self.quit_btn = self._reg_text(QPushButton(), "quit_btn")
-            self.quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.quit_btn.setStyleSheet(
+            link_btn_css = (
                 "QPushButton { border: none; background: transparent; color: palette(placeholderText); padding: 4px 6px; }"
                 "QPushButton:hover { color: palette(text); }"
                 if self._dark
                 else "QPushButton { border: none; background: transparent; color: #64748b; padding: 4px 6px; font-weight: 500; }"
                 "QPushButton:hover { color: #111827; }"
             )
+            self.about_btn = self._reg_text(QPushButton(), "about_btn")
+            self.about_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.about_btn.setStyleSheet(link_btn_css)
+            self.about_btn.clicked.connect(self._show_about_dialog)
+            header_row.addWidget(self.about_btn)
+
+            self.quit_btn = self._reg_text(QPushButton(), "quit_btn")
+            self.quit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.quit_btn.setStyleSheet(link_btn_css)
             self.quit_btn.clicked.connect(self._quit_app)
             header_row.addWidget(self.quit_btn)
             root.addLayout(header_row)
@@ -6191,6 +6262,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.tray_open_act.setText(self._tr("tray_open"))
                 self.tray_quick_act.setText(self._tr("tray_quick"))
                 self.tray_stop_act.setText(self._tr("stop_scan"))
+                self.tray_about_act.setText(self._tr("about_btn"))
                 self.tray_quit_act.setText(self._tr("quit_btn"))
 
             if not self.helper.is_connected:
@@ -7759,6 +7831,62 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.btn_pick_scan.setSubtitle(self._tr("tile_pick_sub"))
 
             self._refresh_metadata()
+
+        def _show_about_dialog(self) -> None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle(self._tr("dlg_about_title"))
+            dlg.setMinimumWidth(460)
+            self._last_about_dialog = dlg
+
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(20, 18, 20, 18)
+            layout.setSpacing(14)
+
+            top = QHBoxLayout()
+            top.setSpacing(14)
+            icon_lbl = QLabel()
+            icon_lbl.setFixedSize(56, 56)
+            icon_lbl.setPixmap(_draw_shield_pixmap(56, "#1f9d68", "check"))
+            top.addWidget(icon_lbl)
+
+            title_col = QVBoxLayout()
+            title_col.setSpacing(2)
+            name_lbl = QLabel(self._tr("app_title"))
+            name_font = QFont()
+            name_font.setPointSize(14)
+            name_font.setBold(True)
+            name_lbl.setFont(name_font)
+            sub_lbl = QLabel(f"v{APP_VERSION} • {self._last_meta.get('version', 'ClamAV')}")
+            sub_lbl.setStyleSheet("color: palette(placeholderText);" if self._dark else "color: #475569;")
+            title_col.addWidget(name_lbl)
+            title_col.addWidget(sub_lbl)
+            top.addLayout(title_col, 1)
+            layout.addLayout(top)
+
+            desc_lbl = QLabel(self._tr("about_desc"))
+            desc_lbl.setWordWrap(True)
+            layout.addWidget(desc_lbl)
+
+            info_frame = QFrame()
+            info_frame.setFrameShape(QFrame.Shape.StyledPanel)
+            form = QFormLayout(info_frame)
+            form.setContentsMargins(14, 12, 14, 12)
+            form.setSpacing(8)
+            form.addRow(self._tr("about_version_lbl"), QLabel(f"v{APP_VERSION}"))
+            form.addRow(self._tr("about_creator_lbl"), QLabel(APP_AUTHOR))
+            form.addRow(self._tr("about_license_lbl"), QLabel(APP_LICENSE))
+
+            github_lbl = QLabel(f'<a href="{APP_GITHUB_URL}">{APP_GITHUB_URL}</a>')
+            github_lbl.setOpenExternalLinks(True)
+            github_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            form.addRow(self._tr("about_github_lbl"), github_lbl)
+            layout.addWidget(info_frame)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dlg.accept)
+            layout.addWidget(buttons)
+
+            dlg.exec()
 
     app = QApplication.instance()
     if app is None:

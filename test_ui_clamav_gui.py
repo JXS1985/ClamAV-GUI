@@ -29,6 +29,7 @@ try:
         QDialog,
         QFileDialog,
         QInputDialog,
+        QLabel,
         QMessageBox,
         QPushButton,
         QSystemTrayIcon,
@@ -42,6 +43,7 @@ except ImportError:
         QDialog,
         QFileDialog,
         QInputDialog,
+        QLabel,
         QMessageBox,
         QPushButton,
         QSystemTrayIcon,
@@ -172,6 +174,21 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
         self.assertIn("Show", self.win.toggle_tabs_btn.text())
         self.assertEqual(self.win.width(), initial_w)
         self.assertEqual(self.win.height(), initial_h)
+
+        # Clicking header About button opens About dialog with creator, version, GPL-3.0 license, and GitHub link
+        with mock.patch.object(QDialog, "exec", return_value=0) as mock_about_exec:
+            QTest.mouseClick(self.win.about_btn, Qt.MouseButton.LeftButton)
+        mock_about_exec.assert_called_once()
+        about_dlg = self.win._last_about_dialog
+        self.assertIsNotNone(about_dlg)
+        assert about_dlg is not None
+        labels = about_dlg.findChildren(QLabel)
+        joined = "\n".join(lbl.text() for lbl in labels)
+        self.assertIn(app_mod.APP_AUTHOR, joined)
+        self.assertIn(app_mod.APP_GITHUB_URL, joined)
+        self.assertIn(app_mod.APP_LICENSE, joined)
+        self.assertIn(app_mod.APP_VERSION, joined)
+        self.assertTrue(any(lbl.openExternalLinks() and app_mod.APP_GITHUB_URL in lbl.text() for lbl in labels))
 
 
 class TestUILocalizationAndPersistence(unittest.TestCase):
@@ -1593,7 +1610,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                             )
 
                     # Non-wrapped action buttons must fit text width inside widget rect
-                    for btn in (w.sudo_btn, w.pkexec_btn, w.toggle_tabs_btn):
+                    for btn in (w.about_btn, w.sudo_btn, w.pkexec_btn, w.toggle_tabs_btn):
                         txt = btn.text().replace("&&", "&")
                         txt_w = btn.fontMetrics().horizontalAdvance(txt)
                         self.assertLessEqual(

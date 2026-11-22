@@ -148,7 +148,8 @@ Section: utils
 Priority: optional
 Architecture: all
 Installed-Size: ${installed_kb}
-Maintainer: ClamAV Security Center Maintainers <noreply@localhost>
+Maintainer: Armin Schneider <JXS1985@users.noreply.github.com>
+Homepage: https://github.com/JXS1985/ClamAV-GUI
 Depends: python3 (>= 3.10), clamav, clamav-freshclam, findutils, procps, polkitd | policykit-1, libnotify-bin, python3-pyqt6 | python3-pyside6.qtwidgets
 Description: ClamAV Security Center GUI for KDE Plasma and GNOME
  Qt6 desktop control center for running, monitoring, pausing, scheduling,
@@ -226,8 +227,8 @@ Name:           ${PKG_NAME}
 Version:        ${rpm_ver}
 Release:        ${rpm_rel}
 Summary:        ClamAV Security Center GUI for KDE Plasma and GNOME
-License:        MIT
-URL:            https://localhost/${PKG_NAME}
+License:        GPL-3.0-or-later
+URL:            https://github.com/JXS1985/ClamAV-GUI
 BuildArch:      noarch
 Source0:        %{name}-%{version}.tar.gz
 
