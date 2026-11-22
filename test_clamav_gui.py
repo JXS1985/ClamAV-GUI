@@ -500,10 +500,10 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             mock.patch.object(
                 app_mod,
                 "parse_proc_stat",
-                side_effect=[{"state": "T"}, {"state": "R"}, {"state": "R"}],
+                side_effect=[{"state": "T"}, {"state": "R"}, {"state": "R"}, None],
             ),
             mock.patch("os.path.exists", return_value=True),
-            mock.patch("time.monotonic", side_effect=[0.0, 0.1, 0.7]),
+            mock.patch("time.monotonic", side_effect=[0.0, 0.1, 0.7, 0.7, 0.8]),
             mock.patch("time.sleep"),
             mock.patch("os.kill") as mock_kill2,
         ):
@@ -511,7 +511,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             self.assertEqual(res2, {"pid": 4321, "sig": "SIGTERM"})
             self.assertEqual(
                 [c[0] for c in mock_kill2.call_args_list],
-                [(4321, signal.SIGTERM), (4321, signal.SIGCONT), (4321, signal.SIGKILL)],
+                [(4321, signal.SIGTERM), (4321, signal.SIGCONT), (4321, signal.SIGKILL), (4321, signal.SIGCONT)],
             )
 
         with (
@@ -1106,6 +1106,119 @@ class TestSecurityHardening(unittest.TestCase):
             ):
                 vos.verify_package_files("rpm")
                 vos.verify_start_menu_entry("gnome")
+
+
+class TestScheduleAndCancellation(unittest.TestCase):
+    """Real-subprocess and filesystem tests for scan cancellation, precount cancel, and systemd schedules."""
+
+    def test_terminate_pid_gracefully_handles_running_paused_and_sigterm_ignoring_children(self) -> None:
+        # 1. Process that ignores SIGTERM -> escalates to SIGKILL and waits until exited
+        ign = subprocess.Popen(
+            [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.1)
+            self.assertIsNone(ign.poll())
+            app_mod._terminate_pid_gracefully(ign.pid)
+            rc = ign.wait(timeout=1.0)
+            self.assertEqual(rc, -signal.SIGKILL)
+        finally:
+            if ign.poll() is None:
+                ign.kill()
+                ign.wait(timeout=1.0)
+
+        # 2. SIGSTOP-paused process -> SIGTERM + SIGCONT kills it cleanly without leaving T state
+        paused = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.1)
+            os.kill(paused.pid, signal.SIGSTOP)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                st = app_mod.parse_proc_stat(paused.pid)
+                if st and st["state"] == "T":
+                    break
+                time.sleep(0.02)
+            app_mod._terminate_pid_gracefully(paused.pid)
+            rc = paused.wait(timeout=1.0)
+            self.assertNotEqual(rc, None)
+        finally:
+            if paused.poll() is None:
+                os.kill(paused.pid, signal.SIGCONT)
+                paused.kill()
+                paused.wait(timeout=1.0)
+
+    def test_cancel_background_precount_stops_worker(self) -> None:
+        app_mod.cancel_background_precount()
+        snap = app_mod.start_background_precount(["/usr"], [], 10 * 1024 * 1024, False)
+        self.assertTrue(snap["running"])
+        app_mod.cancel_background_precount()
+        after = app_mod.get_precount_snapshot()
+        self.assertFalse(after["running"])
+        self.assertFalse(after["done"])
+
+    def test_schedule_enable_disable_roundtrip_and_sanitization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svc = Path(tmpdir) / "clamav-gui-scan.service"
+            tmr = Path(tmpdir) / "clamav-gui-scan.timer"
+            orig_svc, orig_tmr = app_mod.SYSTEMD_SERVICE_PATH, app_mod.SYSTEMD_TIMER_PATH
+            try:
+                app_mod.SYSTEMD_SERVICE_PATH = str(svc)
+                app_mod.SYSTEMD_TIMER_PATH = str(tmr)
+                cmds: list[list[str]] = []
+
+                def _fake_run(cmd: list[str], **_kwargs: object) -> mock.Mock:
+                    cmds.append(list(cmd))
+                    if cmd[:2] == ["systemctl", "is-enabled"]:
+                        return mock.Mock(returncode=0 if is_enabled else 1, stdout="enabled\n" if is_enabled else "disabled\n", stderr="")
+                    if cmd[:2] == ["systemctl", "list-timers"]:
+                        return mock.Mock(returncode=0, stdout="Wed 2026-11-25 06:15:00 CET\n", stderr="")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+
+                is_enabled = True
+                with mock.patch("subprocess.run", side_effect=_fake_run):
+                    res_en = app_mod._helper_set_schedule(
+                        {
+                            "enabled": True,
+                            "frequency": "weekly",
+                            "day_of_week": "Wed",
+                            "time_of_day": "06:15",
+                            "scan_type": "quick",
+                            "quick_targets": ["/home/user/Downloads", '/tmp/bad";id'],
+                        }
+                    )
+                self.assertTrue(res_en["enabled"])
+                self.assertEqual(res_en["day_of_week"], "Wed")
+                self.assertEqual(res_en["time_of_day"], "06:15")
+                self.assertIn("Wed *-*-* 06:15:00", tmr.read_text(encoding="utf-8"))
+                self.assertNotIn('";id', svc.read_text(encoding="utf-8"))
+                self.assertIn(["systemctl", "enable", "--now", "clamav-gui-scan.timer"], cmds)
+
+                is_enabled = False
+                with mock.patch("subprocess.run", side_effect=_fake_run):
+                    res_dis = app_mod._helper_set_schedule(
+                        {
+                            "enabled": False,
+                            "frequency": "daily",
+                            "day_of_week": "Mon",
+                            "time_of_day": "25:99",
+                            "scan_type": "full",
+                            "quick_targets": [],
+                        }
+                    )
+                self.assertFalse(res_dis["enabled"])
+                self.assertEqual(res_dis["time_of_day"], "23:59")
+                self.assertEqual(res_dis["next_run"], "-")
+                self.assertIn('"enabled": false', tmr.read_text(encoding="utf-8"))
+                self.assertIn(["systemctl", "disable", "--now", "clamav-gui-scan.timer"], cmds)
+            finally:
+                app_mod.SYSTEMD_SERVICE_PATH = orig_svc
+                app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
 
 if __name__ == "__main__":

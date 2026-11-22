@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -612,6 +614,156 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(self.win.history_table.item(0, 1).text(), "Quick Scan")
         self.assertEqual(self.win.history_table.item(0, 5).text(), "Clean")
 
+    def test_start_and_cancel_running_and_paused_job_returns_to_start(self) -> None:
+        # 1. Start a job -> active scanning state with elapsed time advancing
+        active_proc = {
+            "pid": 8282,
+            "cmdline": ["clamscan", "-r", "/home/user/Downloads"],
+            "cmdline_str": "clamscan -r /home/user/Downloads",
+            "state": "R",
+            "nice": 0,
+            "rss_kb": 4096,
+            "cpu_ticks": 100,
+            "elapsed_sec": 3.0,
+            "user": "root",
+            "uid": 0,
+            "log_path": app_mod.DEFAULT_LOG_PATH,
+            "quiet_infected_only": False,
+        }
+        with (
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(self.win.helper, "call", return_value={"pid": 8282}) as mock_call,
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[dict(active_proc)]),
+            mock.patch.object(self.win, "_poll_tick", wraps=self.win._poll_tick),
+            mock.patch("threading.Thread"),
+        ):
+            self.win._known_procs = []
+            QTest.mouseClick(self.win.btn_quick_scan, Qt.MouseButton.LeftButton)
+
+        self.assertTrue(any(c[0][0] == "start_scan" for c in mock_call.call_args_list))
+        self.assertIsNotNone(self.win._current_proc)
+        self.assertFalse(self.win.ctrl_box.isHidden())
+        self.assertEqual(self.win.card_status.value_lbl.text(), "RUNNING")
+        self.assertEqual(self.win.card_cpu.value_lbl.text(), "00:00:03")
+
+        # Tick while running: elapsed clock advances to 00:00:08
+        tick2_proc = {**active_proc, "elapsed_sec": 8.0, "cpu_ticks": 180}
+        with (
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[tick2_proc]),
+            mock.patch("threading.Thread"),
+        ):
+            self.win._poll_tick()
+        self.assertEqual(self.win.card_cpu.value_lbl.text(), "00:00:08")
+
+        # 2. Cancel running job via Stop button -> sends SIGTERM, stops precount, resets UI to idle start
+        hist_before = self.win.history_table.rowCount()
+        with (
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            mock.patch.object(self.win.helper, "call", return_value={"pid": 8282, "sig": "SIGTERM"}) as mock_stop_call,
+            mock.patch.object(app_mod, "cancel_background_precount") as mock_cancel_pre,
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+            mock.patch("threading.Thread"),
+        ):
+            QTest.mouseClick(self.win.stop_btn, Qt.MouseButton.LeftButton)
+            mock_stop_call.assert_called_with("signal_proc", {"pid": 8282, "sig": "SIGTERM"})
+            mock_cancel_pre.assert_called()
+
+        self.assertIsNone(self.win._current_proc)
+        self.assertIsNone(self.win._last_active_scan)
+        self.assertIsNone(self.win.telemetry.selected_pid)
+        self.assertTrue(self.win.ctrl_box.isHidden())
+        self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
+        self.assertEqual(self.win.card_status.value_lbl.text(), "Protected")
+        self.assertEqual(self.win.card_cpu.title_lbl.text(), self.win._tr("idle_col_last_scan"))
+        self.assertNotIn("00:00:", self.win.card_cpu.value_lbl.text())
+        self.assertEqual(self.win.progress_bar.value(), 0)
+        self.assertEqual(self.win.progress_bar.format(), "Idle")
+        self.assertFalse(self.win.pause_btn.isEnabled())
+        self.assertFalse(self.win.stop_btn.isEnabled())
+        # Canceled job must not log a false Clean history entry
+        self.assertEqual(self.win.history_table.rowCount(), hist_before)
+
+        # Subsequent idle poll ticks must keep elapsed clock stopped / stay on Start UI
+        with (
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+            mock.patch("threading.Thread"),
+        ):
+            self.win._poll_tick()
+        self.assertTrue(self.win.ctrl_box.isHidden())
+        self.assertEqual(self.win.card_cpu.title_lbl.text(), self.win._tr("idle_col_last_scan"))
+        self.assertNotIn("00:00:", self.win.card_cpu.value_lbl.text())
+
+        # 3. Stale in-flight inspect_proc callback arriving after cancel must not revive scan UI
+        self.win._inspect_inflight = True
+        self.win._on_inspect_done(
+            {"proc": {"alive": True, "current_file": "/stale", "io": {"rchar": 999}}, "log": {}, "precount": {"done": True}},
+            "",
+        )
+        self.assertEqual(self.win.telemetry.last_proc_data, {})
+        self.assertEqual(self.win.telemetry.last_precount, {})
+        self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
+
+    def test_start_pause_then_cancel_real_helper_subprocess(self) -> None:
+        # Real end-to-end HelperClient + `--helper` subprocess spawning and canceling a live process
+        import shutil
+
+        if not shutil.which("clamscan"):
+            self.skipTest("clamscan binary not installed on host")
+
+        client = app_mod.HelperClient()
+        proc = subprocess.Popen(
+            [sys.executable, app_mod.SCRIPT_PATH, "--helper"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            ready = json.loads(proc.stdout.readline())
+            self.assertEqual(ready.get("type"), "ready")
+            client._attach(proc, ready["uid"])
+
+            with (
+                mock.patch.object(self.win, "helper", client),
+                mock.patch.object(self.win, "_notify"),
+            ):
+                # Launch real clamscan against /usr/share via Quick/Custom helper flow
+                res = client.call("start_scan", {"cmd_args": ["clamscan", "-r", "/usr/share"], "log_path": ""}, timeout=5.0)
+                real_pid = int(res["pid"])
+                self.win.telemetry.selected_pid = real_pid
+                found = False
+                for _ in range(20):
+                    self.win._poll_tick()
+                    if self.win._current_proc and self.win._current_proc["pid"] == real_pid:
+                        found = True
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(found, "Helper-started clamscan process was not discovered")
+                self.assertFalse(self.win.ctrl_box.isHidden())
+
+                # Pause via Pause button -> enters 'T' state
+                QTest.mouseClick(self.win.pause_btn, Qt.MouseButton.LeftButton)
+                self.assertEqual(self.win._current_proc["state"], "T")
+                self.assertEqual(self.win.pause_btn.text(), "Resume Scan")
+
+                # Cancel paused scan via Stop button -> kills & reaps cleanly, returns UI to Start
+                with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                    QTest.mouseClick(self.win.stop_btn, Qt.MouseButton.LeftButton)
+
+                self.assertIsNone(self.win._current_proc)
+                self.assertTrue(self.win.ctrl_box.isHidden())
+                self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
+                self.assertFalse(any(p["pid"] == real_pid for p in app_mod.discover_clamscan_processes()))
+        finally:
+            client.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+
 
 class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
     """UI tests for Threats tab, Quarantine tab, and History tab actions."""
@@ -789,6 +941,80 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(mock_call.call_args[0][0], "set_schedule")
         self.assertEqual(mock_call.call_args[0][1]["frequency"], "daily")
         self.assertEqual(mock_call.call_args[0][1]["time_of_day"], "04:45")
+
+    def test_schedule_save_updates_idle_home_card_and_disable_clears_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svc = Path(tmpdir) / "clamav-gui-scan.service"
+            tmr = Path(tmpdir) / "clamav-gui-scan.timer"
+            orig_svc, orig_tmr = app_mod.SYSTEMD_SERVICE_PATH, app_mod.SYSTEMD_TIMER_PATH
+            try:
+                app_mod.SYSTEMD_SERVICE_PATH = str(svc)
+                app_mod.SYSTEMD_TIMER_PATH = str(tmr)
+                timer_enabled = {"val": False}
+
+                def _fake_run(cmd: list[str], **_kwargs: object) -> mock.Mock:
+                    if cmd[:2] == ["systemctl", "enable"]:
+                        timer_enabled["val"] = True
+                        return mock.Mock(returncode=0, stdout="", stderr="")
+                    if cmd[:2] == ["systemctl", "disable"]:
+                        timer_enabled["val"] = False
+                        return mock.Mock(returncode=0, stdout="", stderr="")
+                    if cmd[:2] == ["systemctl", "is-enabled"]:
+                        return mock.Mock(
+                            returncode=0 if timer_enabled["val"] else 1,
+                            stdout="enabled\n" if timer_enabled["val"] else "disabled\n",
+                            stderr="",
+                        )
+                    if cmd[:2] == ["systemctl", "list-timers"]:
+                        return mock.Mock(returncode=0, stdout="Wed 2026-11-25 06:15:00\n", stderr="")
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+
+                def _helper_dispatch(action: str, params: dict[str, object] | None = None, **_kw: object) -> dict[str, object]:
+                    with mock.patch("subprocess.run", side_effect=_fake_run):
+                        return app_mod.HELPER_HANDLERS[action](params or {})
+
+                # Unconnected save attempts to elevate via _require_root_helper
+                self.win._open_tab(4)
+                with mock.patch.object(self.win, "_require_root_helper", return_value=False) as mock_req:
+                    QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+                    mock_req.assert_called_once()
+
+                # Connected enable Weekly Wed 06:15 -> saves units & updates Home Schedule card
+                with (
+                    mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+                    mock.patch.object(self.win.helper, "call", side_effect=_helper_dispatch),
+                    mock.patch.object(QMessageBox, "information"),
+                ):
+                    self.win.sched_enabled_chk.setChecked(True)
+                    self.win.sched_type_combo.setCurrentIndex(self.win.sched_type_combo.findData("full"))
+                    self.win.sched_freq_combo.setCurrentIndex(self.win.sched_freq_combo.findData("weekly"))
+                    self.win.sched_day_combo.setCurrentIndex(self.win.sched_day_combo.findData("Wed"))
+                    self.win.sched_time_edit.setTime(QTime(6, 15))
+                    QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+
+                    self.assertTrue(tmr.exists())
+                    self.assertEqual(self.win.card_threats.value_lbl.text(), "Wed 06:15")
+                    self.assertIn("Enabled", self.win.sched_status_lbl.text())
+
+                    # Disabling schedule resets Home Schedule card back to "Not scheduled" even while unit file exists
+                    self.win.sched_enabled_chk.setChecked(False)
+                    QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+                    self.assertEqual(self.win.card_threats.value_lbl.text(), self.win._tr("idle_val_not_sched"))
+
+                    # Re-enable daily 02:05 and verify refresh reads persisted state back
+                    self.win.sched_enabled_chk.setChecked(True)
+                    self.win.sched_freq_combo.setCurrentIndex(self.win.sched_freq_combo.findData("daily"))
+                    self.win.sched_time_edit.setTime(QTime(2, 5))
+                    QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+                    self.assertEqual(self.win.card_threats.value_lbl.text(), "Daily 02:05")
+
+                    self.win.sched_time_edit.setTime(QTime(12, 0))
+                    QTest.mouseClick(self.win.sched_refresh_btn, Qt.MouseButton.LeftButton)
+                    self.assertEqual(self.win.sched_time_edit.time(), QTime(2, 5))
+                    self.assertEqual(self.win.sched_freq_combo.currentData(), "daily")
+            finally:
+                app_mod.SYSTEMD_SERVICE_PATH = orig_svc
+                app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
     def test_custom_scan_tab_preview_and_launch(self) -> None:
         self.win._open_tab(5)

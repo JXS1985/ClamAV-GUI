@@ -2724,6 +2724,38 @@ def get_precount_snapshot() -> dict[str, Any]:
         return snap
 
 
+def cancel_background_precount() -> None:
+    """Terminate any running background pre-count worker and clear cached pre-count state."""
+    global _PRECOUNT_GEN, _PRECOUNT_PROC
+    with _PRECOUNT_LOCK:
+        _PRECOUNT_GEN += 1
+        proc = _PRECOUNT_PROC
+        _PRECOUNT_PROC = None
+        _PRECOUNT_STATE.update(
+            {
+                "key": None,
+                "gen": _PRECOUNT_GEN,
+                "running": False,
+                "done": False,
+                "all_files": 0,
+                "all_bytes": 0,
+                "eligible_files": 0,
+                "eligible_bytes": 0,
+                "elapsed_sec": 0.0,
+            }
+        )
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+                proc.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
 def start_background_precount(
     targets: list[str],
     exclude_dirs: list[str],
@@ -3216,7 +3248,8 @@ def build_systemd_schedule_units(
     time_of_day: str,
     scan_type: str,
     quick_targets: list[str],
-) -> tuple[str, str, dict[str, str]]:
+    enabled: bool = True,
+) -> tuple[str, str, dict[str, Any]]:
     """Generate systemd service and timer unit contents for scheduled ClamAV scans."""
     day_map = {
         "monday": "Mon",
@@ -3266,6 +3299,7 @@ def build_systemd_schedule_units(
         )
 
     cfg = {
+        "enabled": bool(enabled),
         "frequency": freq,
         "day_of_week": day3,
         "time_of_day": time_norm,
@@ -3326,11 +3360,18 @@ def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
     return {"proc": proc_info, "log": log_info, "precount": precount_snap}
 
 
+_SPAWNED_PROCS_LOCK = threading.Lock()
+_SPAWNED_PROCS: dict[int, subprocess.Popen[Any]] = {}
+
+
 def _terminate_pid_gracefully(pid: int, force_cont: bool = False) -> None:
-    """Terminate pid even if SIGSTOP-paused, escalating to SIGKILL if still alive."""
+    """Terminate pid even if SIGSTOP-paused, escalating to SIGKILL and waiting for exit."""
     stat_before = parse_proc_stat(pid)
     was_paused = force_cont or bool(stat_before and stat_before.get("state") == "T")
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
     if was_paused:
         try:
             os.kill(pid, signal.SIGCONT)
@@ -3346,10 +3387,35 @@ def _terminate_pid_gracefully(pid: int, force_cont: bool = False) -> None:
         if not st or st["state"] in ("Z", "X", "x"):
             return
         time.sleep(0.05)
+
+    st_now = parse_proc_stat(pid)
+    still_paused = was_paused or bool(st_now and st_now.get("state") == "T")
     try:
         os.kill(pid, signal.SIGKILL)
+        if still_paused:
+            os.kill(pid, signal.SIGCONT)
     except ProcessLookupError:
-        pass
+        return
+
+    kill_deadline = time.monotonic() + 1.5
+    while time.monotonic() < kill_deadline:
+        st = parse_proc_stat(pid)
+        if not st or st["state"] in ("Z", "X", "x"):
+            return
+        time.sleep(0.05)
+
+
+def _reap_spawned_proc(pid: int) -> None:
+    """Wait synchronously for a helper-spawned process to exit so /proc/<pid> is gone."""
+    with _SPAWNED_PROCS_LOCK:
+        proc = _SPAWNED_PROCS.get(pid)
+    if proc is not None:
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+        with _SPAWNED_PROCS_LOCK:
+            _SPAWNED_PROCS.pop(pid, None)
 
 
 def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
@@ -3360,15 +3426,19 @@ def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported signal: {sig_name}")
     _validate_clamscan_pid(pid)
     if sig_name == "SIGTERM":
+        cancel_background_precount()
         _terminate_pid_gracefully(pid)
+        _reap_spawned_proc(pid)
     elif sig_name == "SIGKILL":
+        cancel_background_precount()
         stat_before = parse_proc_stat(pid)
-        os.kill(pid, signal.SIGKILL)
-        if stat_before and stat_before.get("state") == "T":
-            try:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            if stat_before and stat_before.get("state") == "T":
                 os.kill(pid, signal.SIGCONT)
-            except ProcessLookupError:
-                pass
+        except ProcessLookupError:
+            pass
+        _reap_spawned_proc(pid)
     else:
         os.kill(pid, getattr(signal, sig_name))
     return {"pid": pid, "sig": sig_name}
@@ -3509,8 +3579,18 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
             start_new_session=True,
             close_fds=True,
         )
+        with _SPAWNED_PROCS_LOCK:
+            _SPAWNED_PROCS[proc.pid] = proc
+
+        def _wait_and_cleanup(p: subprocess.Popen[Any] = proc) -> None:
+            try:
+                p.wait()
+            finally:
+                with _SPAWNED_PROCS_LOCK:
+                    _SPAWNED_PROCS.pop(p.pid, None)
+
         # Reap exited child clamscan asynchronously so helper never leaves Z-state zombies.
-        threading.Thread(target=proc.wait, daemon=True).start()
+        threading.Thread(target=_wait_and_cleanup, daemon=True).start()
     finally:
         if log_fh is not None:
             log_fh.close()
@@ -3873,6 +3953,7 @@ def _helper_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
         time_of_day,
         scan_type,
         quick_targets,
+        enabled=enabled,
     )
     with open(SYSTEMD_SERVICE_PATH, "w", encoding="utf-8") as fh:
         fh.write(service_txt)
@@ -5785,14 +5866,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             layout.addLayout(form)
 
             btn_row = QHBoxLayout()
-            save_btn = self._reg_text(QPushButton(), "save_sched_btn")
-            save_btn.setIcon(QIcon.fromTheme("document-save"))
-            save_btn.clicked.connect(self._save_schedule)
-            btn_row.addWidget(save_btn)
+            self.sched_save_btn = self._reg_text(QPushButton(), "save_sched_btn")
+            self.sched_save_btn.setIcon(QIcon.fromTheme("document-save"))
+            self.sched_save_btn.clicked.connect(self._save_schedule)
+            btn_row.addWidget(self.sched_save_btn)
 
-            refresh_btn = self._reg_text(QPushButton(), "refresh_btn")
-            refresh_btn.clicked.connect(self._refresh_schedule)
-            btn_row.addWidget(refresh_btn)
+            self.sched_refresh_btn = self._reg_text(QPushButton(), "refresh_btn")
+            self.sched_refresh_btn.clicked.connect(self._refresh_schedule)
+            btn_row.addWidget(self.sched_refresh_btn)
             btn_row.addStretch(1)
             layout.addLayout(btn_row)
             layout.addStretch(1)
@@ -6318,9 +6399,26 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._update_hero_banner(self._current_proc)
             self._update_tray_status(self._current_proc)
 
+        def _compact_window_if_idle(self) -> None:
+            if not self.toggle_tabs_btn.isChecked() and self._current_proc is None:
+                if self.centralWidget() and self.centralWidget().layout():
+                    self.centralWidget().layout().activate()
+                self.resize(self.width(), max(460, self.minimumSizeHint().height()))
+
+        def _clear_scan_telemetry(self) -> None:
+            self.telemetry.selected_pid = None
+            self.telemetry.last_proc_data = {}
+            self.telemetry.last_precount = {}
+            self.telemetry.last_eta_speed_bps = None
+            self.telemetry.last_cpu_ticks = None
+            self.telemetry.last_cpu_time = None
+            self.telemetry.last_io_bytes = None
+            self.telemetry.last_io_time = None
+
         def _poll_tick(self) -> None:
             procs = discover_clamscan_processes()
             self._known_procs = procs
+            was_running = self._current_proc is not None
 
             selected = next((p for p in procs if p["pid"] == self.telemetry.selected_pid), None)
             if selected is None and procs:
@@ -6336,8 +6434,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 if self._last_active_scan is not None:
                     self._handle_scan_finished(self._last_active_scan)
                     self._last_active_scan = None
-                self.telemetry.last_proc_data = {}
-                self.telemetry.last_eta_speed_bps = None
+                self._clear_scan_telemetry()
 
             if selected is not None:
                 label = self._pending_scan_labels.get(selected["pid"])
@@ -6358,6 +6455,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._update_controls_enabled()
             self._update_hero_banner(selected)
             self._update_tray_status(selected)
+            if was_running and selected is None:
+                self._compact_window_if_idle()
 
             log_path = self.log_path_edit.text().strip()
             if selected and selected["log_path"] and self.telemetry.log_path != selected["log_path"]:
@@ -6455,6 +6554,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     text = fh.read()
             except OSError:
                 return self._tr("idle_val_not_sched")
+            for raw in text.splitlines():
+                if raw.startswith("# CLAMAV_GUI_CONFIG="):
+                    try:
+                        cfg = json.loads(raw.split("=", 1)[1].strip())
+                        if isinstance(cfg, dict) and cfg.get("enabled") is False:
+                            return self._tr("idle_val_not_sched")
+                    except json.JSONDecodeError:
+                        pass
             for raw in text.splitlines():
                 if raw.strip().startswith("OnCalendar="):
                     val = raw.split("=", 1)[1].strip()
@@ -6744,12 +6851,17 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not (self._current_proc and self._current_proc.get("quiet_infected_only")):
                 self.log_hint_lbl.setText("")
 
+            if self._current_proc is None:
+                log_res = result.get("log") or {}
+                self._apply_log_result(log_res)
+                return
+
             if isinstance(result.get("precount"), dict) and result["precount"]:
                 self.telemetry.last_precount = result["precount"]
 
             proc_data = result.get("proc") or {}
             self.telemetry.last_proc_data = proc_data
-            if proc_data.get("alive") and self._current_proc is not None:
+            if proc_data.get("alive"):
                 current_file = proc_data.get("current_file")
                 tmp_count = proc_data.get("tmp_count", 0)
                 if current_file:
@@ -6987,14 +7099,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if ans != QMessageBox.StandardButton.Yes:
                 return
             try:
+                stopped_pid = proc["pid"]
                 if proc.get("uid") == os.getuid() and not self.helper.is_connected:
-                    _terminate_pid_gracefully(proc["pid"], force_cont=(proc.get("state") == "T"))
+                    _terminate_pid_gracefully(stopped_pid, force_cont=(proc.get("state") == "T"))
                 else:
                     if not self._require_root_helper():
                         return
-                    self.helper.call("signal_proc", {"pid": proc["pid"], "sig": "SIGTERM"})
+                    self.helper.call("signal_proc", {"pid": stopped_pid, "sig": "SIGTERM"})
+                cancel_background_precount()
                 self._last_active_scan = None
+                self._pending_scan_labels.pop(stopped_pid, None)
+                self._clear_scan_telemetry()
                 self._poll_tick()
+                self._compact_window_if_idle()
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, self._tr("dlg_stop_err"), str(exc))
 
@@ -7276,6 +7393,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.sched_status_lbl.setText(
                     self._tr("sched_saved_status", state=state_txt, next_run=res.get("next_run", "-"))
                 )
+                if self._current_proc is None:
+                    self._render_idle_stats_strip()
                 QMessageBox.information(
                     self, self._tr("sched_saved_title"), self._tr("sched_saved_msg", state=state_txt)
                 )
