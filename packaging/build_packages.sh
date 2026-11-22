@@ -106,6 +106,8 @@ stage_usr_payload() {
   install -d "${stage_dir}/usr/share/icons/hicolor/scalable/apps"
 
   install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${stage_dir}/usr/share/${PKG_NAME}/clamav_gui.py"
+  install -d "${stage_dir}/usr/share/${PKG_NAME}/clamav_backend"
+  install -m 0644 "${REPO_ROOT}"/clamav_backend/*.py "${stage_dir}/usr/share/${PKG_NAME}/clamav_backend/"
   install -m 0755 "${REPO_ROOT}/run.sh" "${stage_dir}/usr/share/${PKG_NAME}/run.sh"
   render_launcher_wrapper "${stage_dir}/usr/bin/${PKG_NAME}"
   ln -s "${PKG_NAME}" "${stage_dir}/usr/bin/clamav-kde-gui"
@@ -204,6 +206,8 @@ build_rpm() {
   src_dir="${rpm_top}/src_stage/${PKG_NAME}-${rpm_ver}"
   mkdir -p "${src_dir}/packaging"
   install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${src_dir}/clamav_gui.py"
+  install -d "${src_dir}/clamav_backend"
+  install -m 0644 "${REPO_ROOT}"/clamav_backend/*.py "${src_dir}/clamav_backend/"
   install -m 0755 "${REPO_ROOT}/run.sh" "${src_dir}/run.sh"
   render_launcher_wrapper "${src_dir}/packaging/${PKG_NAME}"
   render_desktop_file "${src_dir}/packaging/${PKG_NAME}.desktop"
@@ -235,7 +239,7 @@ with automatic OS locale detection across 8 languages.
 %setup -q
 
 %build
-python3 -m py_compile clamav_gui.py
+python3 -m compileall -q clamav_gui.py clamav_backend
 
 %install
 install -d -m 0755 %{buildroot}%{_datadir}/%{name}
@@ -243,6 +247,8 @@ install -d -m 0755 %{buildroot}%{_bindir}
 install -d -m 0755 %{buildroot}%{_datadir}/applications
 install -d -m 0755 %{buildroot}%{_datadir}/icons/hicolor/scalable/apps
 install -m 0755 clamav_gui.py %{buildroot}%{_datadir}/%{name}/clamav_gui.py
+install -d %{buildroot}%{_datadir}/%{name}/clamav_backend
+install -m 0644 clamav_backend/*.py %{buildroot}%{_datadir}/%{name}/clamav_backend/
 install -m 0755 run.sh %{buildroot}%{_datadir}/%{name}/run.sh
 install -m 0755 packaging/${PKG_NAME} %{buildroot}%{_bindir}/${PKG_NAME}
 ln -s ${PKG_NAME} %{buildroot}%{_bindir}/clamav-kde-gui
@@ -252,6 +258,7 @@ install -m 0644 packaging/${PKG_NAME}.svg %{buildroot}%{_datadir}/icons/hicolor/
 %files
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/clamav_gui.py
+%{_datadir}/%{name}/clamav_backend
 %{_datadir}/%{name}/run.sh
 %{_bindir}/${PKG_NAME}
 %{_bindir}/clamav-kde-gui

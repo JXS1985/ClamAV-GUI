@@ -35,6 +35,8 @@ package() {
   install -d "${pkgdir}/usr/share/icons/hicolor/scalable/apps"
 
   install -m 0755 "${srcdir_root}/clamav_gui.py" "${pkgdir}/usr/share/${pkgname}/clamav_gui.py"
+  install -d "${pkgdir}/usr/share/${pkgname}/clamav_backend"
+  install -m 0644 "${srcdir_root}"/clamav_backend/*.py "${pkgdir}/usr/share/${pkgname}/clamav_backend/"
   install -m 0755 "${srcdir_root}/run.sh" "${pkgdir}/usr/share/${pkgname}/run.sh"
 
   cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'

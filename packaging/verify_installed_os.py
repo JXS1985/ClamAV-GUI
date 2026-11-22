@@ -106,7 +106,11 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
+    sys.path.insert(0, str(INSTALLED_PY.parent))
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.pop(0)
 
     # Launch installed window headlessly if no display, or against live Xvfb/Wayland/X11 if available
     has_live_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))

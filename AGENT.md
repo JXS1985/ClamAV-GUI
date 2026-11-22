@@ -8,7 +8,7 @@ You are working on **ClamAV Security Center**, a Python 3 / Qt6 (`PySide6` with 
   ```bash
   QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v
   QT_QPA_PLATFORM=offscreen python3 clamav_gui.py --self-test
-  python3 -m compileall -q clamav_gui.py tests packaging/verify_installed_os.py
+  python3 -m compileall -q clamav_gui.py clamav_backend tests packaging/verify_installed_os.py
   bash -n run.sh && bash -n packaging/build_packages.sh && bash -n packaging/PKGBUILD
   ```
 
@@ -20,7 +20,7 @@ You are working on **ClamAV Security Center**, a Python 3 / Qt6 (`PySide6` with 
 All code crossing the unprivileged UI and privileged root `--helper` boundary must enforce defensive security:
 - **Privilege Separation (`--helper` JSON-RPC Bridge):** Validate every action parameter entering `run_helper()`. Enforce root-owned executable checks (`_is_secure_root_owned_path`) and strict `clamscan` argument allowlists (`_validate_clamscan_args`). Never accept arbitrary flags (`-l`, unvalidated `--move`, etc.) or relative binary paths.
 - **Filesystem, Symlink & Path Confinement:** Prevent path traversal, symlink following (`O_NOFOLLOW`, `_ensure_no_symlink_ancestors_and_mkdir`), and protected system path modification (`_is_protected_system_path`). Confine root logs to `/var/log/` (`_validate_helper_log_path`) and root quarantine to `/root/quarantine` (`_resolve_quarantine_dir`). Use atomic temp-file replacement (`save_json_file`) and collision-safe naming (`_helper_quarantine_file`) for quarantine and state manifests.
-- **Process & Command Hardening:** Never pass `shell=True` to `subprocess`. Verify target PIDs belong to a genuine `clamscan` binary (`_validate_clamscan_pid`) before sending signals (`_terminate_pid_gracefully`) or adjusting priority (`renice`/`ionice`). Sanitize `systemd` unit paths (`_is_safe_systemd_path`) and scope Polkit rules strictly (`subject.active && subject.local`, exact caller username, and root-owned script/interpreter paths).
+- **Process & Command Hardening:** Never pass `shell=True` to `subprocess`. Verify target PIDs belong to a genuine `clamscan` binary (`_validate_clamscan_pid`) before sending signals (`_terminate_pid_gracefully`) or adjusting priority (`renice`/`ionice`). Sanitize `systemd` unit paths (`_is_safe_systemd_path`) and require explicit elevation for each privileged helper session.
 - **Credential & UI Output Safety:** Never log, persist, or expose `sudo` passwords. Render untrusted file paths and ClamAV log output only through plain-text Qt APIs (`setPlainText`, `QTableWidgetItem`, `QLineEdit`) so markup or control characters in scanned paths cannot execute or inject HTML.
 
 ### 2. Testing, Desktop & Localization Requirements (Mandatory for New Features)

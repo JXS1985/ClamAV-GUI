@@ -128,7 +128,7 @@ chmod +x run.sh clamav_gui.py
 ### 1. Access Modes (Root vs. Unprivileged User Mode vs. Local Helper)
 
 - **Windows & macOS:** Connects its local `--helper` process automatically (`Protected Access Active`) with no Polkit or `sudo` prompt required.
-- **Linux — Protected Root Mode:** Click **Unlock Password...** (`sudo`) or **Unlock via Polkit** (`pkexec`) in the top banner to run system-wide scans (`/`), read `/var/log/clamav-scan.log`, quarantine root-owned files in `/root/quarantine`, update `/var/lib/clamav` via `freshclam`, and manage system `systemd` timers. Upon unlock, it installs a tightly scoped Polkit rule for seamless future launches.
+- **Linux — Protected Root Mode:** Click **Unlock Password...** (`sudo`) or **Unlock via Polkit** (`pkexec`) to authorize the current helper session. This permits system-wide scans, shared signature updates, and system `systemd` timers. Quarantine and deletion through a delegated helper are limited to files owned by the invoking user. For findings owned by other users, review the results with your system administrator.
 - **Linux — Unprivileged User Mode (No Root Required):** If your account does not have `sudo`/Polkit access, click **User Mode** in the top banner (or **Continue in User Mode** when prompted). In **User Mode Active**:
   - Scans, live telemetry (`/proc/<pid>/io`, `/proc/<pid>/fd` for your own `clamscan` process), ETA, and Pause/Resume/Stop work normally on all files your user can read.
   - Scan logs (`clamav-scan.log`), isolated threats (`quarantine/`), user `freshclam.conf`, and downloaded signatures (`database/`) are stored in `~/.local/share/clamav-kde-gui/`.
@@ -161,14 +161,14 @@ While a scan runs, the **Active Scan Progress & Controls** panel expands to show
 Expand **Logs, Quarantine & Settings** and open the **Threats & Quarantine** tab:
 
 - **Threats:** Select a detected file to **Reveal in File Manager** (Dolphin, Nautilus, Windows Explorer `explorer.exe /select`, or macOS Finder `open -R`), **Copy Path**, **Move to Quarantine**, or **Delete File**.
-- **Quarantine:** Isolated files are stripped of execute permissions (`0600` inside a `0700` directory) with original metadata tracked in `manifest.json`. You can **Restore to Original Location**, **Restore to Folder...**, or **Delete Permanently**.
+- **Quarantine:** On POSIX, samples are stored with mode `0600` and their original permissions are recorded in `manifest.json`. Restore preserves ordinary permission bits, with mode `0600` as the fallback for legacy items. For delegated Linux restores, choose an existing writable folder you own.
 
 ### 5. Scheduling Automatic Scans & Custom Scans
 
 Open the **Schedule & Custom Scan** tab:
 
 - **Automatic Schedules:** Enable daily or weekly scheduled background scans (`Quick` or `Full`), pick the day and time, and click **Save Schedule**. Uses `systemd` system timers (Linux root), `systemd --user` timers (Linux User Mode), Windows Task Scheduler `schtasks` (`%LOCALAPPDATA%\clamav-kde-gui\scheduled-scan.cmd`), or macOS `launchd` LaunchAgents (`~/Library/LaunchAgents`).
-- **Custom Scan Builder:** Choose any target path, toggle recursion, `-i`, virtual filesystem exclusions, `--cross-fs=no`, max scan/file size, infected action (`Report only`, `Move to Quarantine`, or `Copy`), custom log path, inspect the live command preview, and click **Start Custom Scan**.
+- **Custom Scan Builder:** Choose a target path, adjust scan limits and exclusions, and inspect the command preview. Delegated Linux scans use **Report only**. The Threats tab offers quarantine and deletion after review.
 
 ---
 
@@ -186,11 +186,13 @@ Open the **Schedule & Custom Scan** tab:
 
 ## Security Architecture
 
+The Qt application communicates with its helper over standard input and output. The wire protocol, Win32 process controls, and POSIX process and file operations live in the Qt-independent `clamav_backend` package.
+
 Code crossing the GUI / `--helper` JSON-RPC (`stdin`/`stdout`) boundary enforces strict hardening:
 - Root-owned executable checks on Linux and `clamscan` / `clamscan.exe` argument allowlisting (no arbitrary flags or `shell=True`).
 - Path-traversal prevention, symlink-ancestor refusal (`O_NOFOLLOW` / `O_DIRECTORY`), and protected system directory guards before quarantine/delete/restore operations.
 - Root log confinement to `/var/log/` and root quarantine confinement to `/root/quarantine` when running as Linux root, with safe remapping to user data directories in unprivileged User Mode.
-- Verified `clamscan` PID ownership checks before signaling or priority changes, strictly scoped Polkit rules (`subject.active && subject.local`), and plain-text Qt rendering for untrusted file paths and logs.
+- Verified `clamscan` PID ownership checks before signaling or priority changes, per-session sudo or Polkit authorization, and plain-text Qt rendering for untrusted file paths and logs. The legacy passwordless helper command is rejected and the app uses a fresh elevation command.
 
 ---
 
@@ -221,7 +223,7 @@ GitHub Actions CI (`.github/workflows/ci.yml`, manual `workflow_dispatch`, max 2
 ```bash
 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen python3 clamav_gui.py --self-test
-python3 -m compileall -q clamav_gui.py tests packaging/verify_installed_os.py
+python3 -m compileall -q clamav_gui.py clamav_backend tests packaging/verify_installed_os.py
 bash -n run.sh && bash -n packaging/build_packages.sh && bash -n packaging/PKGBUILD
 ```
 

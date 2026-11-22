@@ -208,7 +208,7 @@ jobs:
 
       - name: Verify Python bytecode compilation and scripts
         run: |
-          python3 -m compileall -q clamav_gui.py tests packaging/verify_installed_os.py
+          python3 -m compileall -q clamav_gui.py clamav_backend tests packaging/verify_installed_os.py
           bash -n run.sh
           bash -n packaging/build_packages.sh
           bash -n packaging/PKGBUILD
@@ -241,7 +241,7 @@ jobs:
             smoke_dir=$(mktemp -d)
             trap 'rm -rf "${smoke_dir}"' EXIT
             chmod 755 "${smoke_dir}"
-            cp -R clamav_gui.py tests "${smoke_dir}/"
+            cp -R clamav_gui.py clamav_backend tests "${smoke_dir}/"
             cd "${smoke_dir}"
             runuser -u nobody -- python3 -m unittest -v tests.test_ui_clamav_gui.TestUILiveClamAV \
               tests.test_clamav_gui.TestWindowsCompatibility.test_frozen_self_test_fallback_temp_log
@@ -318,11 +318,10 @@ jobs:
             if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then
               timeout 4s /usr/bin/clamav-security-center --lang "${gui_lang}"
               rc=$?
-            elif [ "${PKG_MGR}" != "zypper" ] && command -v xvfb-run >/dev/null 2>&1; then
+            elif command -v xvfb-run >/dev/null 2>&1; then
               QT_QPA_PLATFORM=xcb timeout 4s xvfb-run -a /usr/bin/clamav-security-center --lang "${gui_lang}"
               rc=$?
             else
-              # The app crashes under Xvfb in headless openSUSE containers.
               QT_QPA_PLATFORM=offscreen timeout 4s /usr/bin/clamav-security-center --lang "${gui_lang}"
               rc=$?
             fi
@@ -372,7 +371,7 @@ jobs:
         run: python -m pip install --upgrade pip PySide6 pyinstaller
 
       - name: Compile-check Python modules
-        run: python -m compileall -q clamav_gui.py tests
+        run: python -m compileall -q clamav_gui.py clamav_backend tests
 
       - name: Run self-test
         env:
@@ -430,7 +429,7 @@ jobs:
         run: python -m pip install --upgrade pip PySide6 pyinstaller
 
       - name: Compile-check Python modules
-        run: python -m compileall -q clamav_gui.py tests
+        run: python -m compileall -q clamav_gui.py clamav_backend tests
 
       - name: Run self-test
         env:

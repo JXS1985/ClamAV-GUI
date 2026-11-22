@@ -3,15 +3,18 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import signal
+import stat
 import string
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -548,7 +551,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             self.assertEqual(log_file.read_text(encoding="utf-8"), "")
             self.assertEqual(mock_popen.call_args[1]["stderr"], subprocess.STDOUT)
 
-    def test_freshclam_polkit_and_schedule_handlers(self) -> None:
+    def test_freshclam_and_schedule_handlers(self) -> None:
         # _detect_freshclam_services + _helper_run_freshclam (restarts service even when freshclam errors)
         calls: list[list[str]] = []
 
@@ -583,31 +586,14 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 app_mod._helper_run_freshclam({})
 
-        # _helper_install_polkit_rule & _helper_set_schedule / _helper_get_schedule with temp paths
+        # _helper_set_schedule / _helper_get_schedule with temp paths
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            orig_rule = app_mod.POLKIT_RULE_PATH
             orig_svc = app_mod.SYSTEMD_SERVICE_PATH
             orig_tmr = app_mod.SYSTEMD_TIMER_PATH
             try:
-                app_mod.POLKIT_RULE_PATH = str(tmp_path / "polkit" / "50-clamav.rules")
                 app_mod.SYSTEMD_SERVICE_PATH = str(tmp_path / "clamav-gui-scan.service")
                 app_mod.SYSTEMD_TIMER_PATH = str(tmp_path / "clamav-gui-scan.timer")
-
-                with self.assertRaises(ValueError):
-                    app_mod._helper_install_polkit_rule({"username": ""})
-                with self.assertRaises(KeyError):
-                    app_mod._helper_install_polkit_rule({"username": "no_such_user_xyz_999"})
-
-                import getpass
-
-                cur_user = getpass.getuser()
-                with mock.patch("os.geteuid", return_value=1000):
-                    p_res = app_mod._helper_install_polkit_rule({"username": cur_user})
-                rule_txt = Path(p_res["rule_path"]).read_text(encoding="utf-8")
-                self.assertIn(f'subject.user == {json.dumps(cur_user)}', rule_txt)
-                self.assertIn("org.freedesktop.policykit.exec", rule_txt)
-                self.assertIn(app_mod.SCRIPT_PATH, rule_txt)
 
                 # Systemd schedule write + read back
                 def fake_sys_run(cmd: list[str], **_kw: object) -> mock.Mock:
@@ -635,7 +621,6 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
                 self.assertTrue(os.path.exists(app_mod.SYSTEMD_SERVICE_PATH))
                 self.assertTrue(os.path.exists(app_mod.SYSTEMD_TIMER_PATH))
             finally:
-                app_mod.POLKIT_RULE_PATH = orig_rule
                 app_mod.SYSTEMD_SERVICE_PATH = orig_svc
                 app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
@@ -943,34 +928,122 @@ class TestSecurityHardening(unittest.TestCase):
                     app_mod.DEFAULT_LOG_PATH,
                 )
 
-    def test_polkit_rule_refuses_user_writable_script_and_enforces_local_active(self) -> None:
-        with mock.patch("os.geteuid", return_value=0), mock.patch.object(
-            app_mod, "_is_secure_root_owned_path", side_effect=lambda p: p != app_mod.SCRIPT_PATH
+    def test_legacy_polkit_command_cannot_start_elevated_helper(self) -> None:
+        with (
+            mock.patch("os.geteuid", return_value=0),
+            mock.patch.dict(os.environ, {"PKEXEC_UID": "1000"}),
+            mock.patch.object(app_mod, "run_helper", return_value=0) as helper,
+            mock.patch.object(sys, "argv", ["clamav_gui.py", "--helper"]),
+            mock.patch.object(sys, "stderr", new_callable=io.StringIO),
         ):
-            with self.assertRaises(PermissionError):
-                app_mod._helper_install_polkit_rule({"username": "root"})
+            with self.assertRaises(SystemExit) as exc:
+                app_mod.main()
+            self.assertEqual(exc.exception.code, 2)
+            helper.assert_not_called()
+            with mock.patch.object(sys, "argv", ["clamav_gui.py", "--elevated-helper"]):
+                self.assertEqual(app_mod.main(), 0)
+            helper.assert_called_once()
+        self.assertNotIn("install_polkit_rule", app_mod.HELPER_HANDLERS)
 
-        # Caller mismatch under PKEXEC_UID rejected
-        with mock.patch.dict(os.environ, {"PKEXEC_UID": str(os.getuid())}), mock.patch(
-            "pwd.getpwuid", return_value=mock.Mock(pw_name="alice")
-        ):
-            with self.assertRaises(PermissionError):
-                app_mod._helper_install_polkit_rule({"username": "bob"})
-
-        # Generated rule includes subject.active && subject.local
+    def test_delegated_file_actions_reject_other_owners(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_rule = app_mod.POLKIT_RULE_PATH
-            try:
-                app_mod.POLKIT_RULE_PATH = str(Path(tmpdir) / "49.rules")
-                import getpass
+            root = Path(tmpdir)
+            sample = root / "other-user.txt"
+            sample.write_text("keep", encoding="utf-8")
+            qdir = root / "quarantine"
+            with (
+                mock.patch.object(app_mod, "_elevated_owner", return_value=os.getuid() + 1),
+                mock.patch("os.geteuid", return_value=1000),
+            ):
+                with self.assertRaisesRegex(PermissionError, "owned by the invoking user"):
+                    app_mod._helper_delete_file({"path": str(sample)})
+                with self.assertRaisesRegex(PermissionError, "owned by the invoking user"):
+                    app_mod._helper_quarantine_file({"path": str(sample), "quarantine_dir": str(qdir)})
+            self.assertEqual(sample.read_text(encoding="utf-8"), "keep")
 
-                cur = getpass.getuser()
-                with mock.patch("os.geteuid", return_value=1000):
-                    res = app_mod._helper_install_polkit_rule({"username": cur})
-                content = Path(res["rule_path"]).read_text(encoding="utf-8")
-                self.assertIn("subject.active && subject.local", content)
-            finally:
-                app_mod.POLKIT_RULE_PATH = orig_rule
+    def test_delegated_scan_cannot_move_or_copy_other_users_files(self) -> None:
+        with (
+            mock.patch.object(app_mod, "_elevated_owner", return_value=1000),
+            mock.patch.object(app_mod, "_euid", return_value=0),
+            mock.patch.object(app_mod, "_is_secure_root_owned_path", return_value=True),
+            mock.patch("os.path.realpath", side_effect=lambda path: path),
+        ):
+            for flag in ("--move", "--copy"):
+                with self.subTest(flag=flag), self.assertRaisesRegex(PermissionError, "Report only"):
+                    app_mod._validate_clamscan_args(["/usr/bin/clamscan", f"{flag}=/root/quarantine", "/tmp"])
+
+    @unittest.skipUnless(app_mod._is_posix_root(), "Requires test container root to exercise uid separation")
+    def test_delegated_quarantine_round_trip_and_isolation(self) -> None:
+        import pwd
+
+        user = pwd.getpwnam("nobody")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            root.chmod(0o755)
+            source_dir = root / "user"
+            source_dir.mkdir(mode=0o700)
+            os.chown(source_dir, user.pw_uid, user.pw_gid)
+            sample = source_dir / "private.bin"
+            sample.write_bytes(b"sample")
+            sample.chmod(0o640)
+            os.chown(sample, user.pw_uid, user.pw_gid)
+            qdir = str(root / "quarantine")
+            with (
+                mock.patch.object(app_mod, "DEFAULT_QUARANTINE_DIR", qdir),
+                mock.patch.dict(os.environ, {"PKEXEC_UID": str(user.pw_uid)}),
+            ):
+                app_mod._helper_quarantine_file({"path": str(sample), "quarantine_dir": qdir})
+                self.assertFalse(sample.exists())
+                self.assertEqual(len(app_mod._helper_list_quarantine({"quarantine_dir": qdir})["items"]), 1)
+                with mock.patch.dict(os.environ, {"PKEXEC_UID": str(user.pw_uid + 1)}):
+                    self.assertEqual(app_mod._helper_list_quarantine({"quarantine_dir": qdir})["items"], [])
+                    with self.assertRaises(PermissionError):
+                        app_mod._helper_delete_quarantine({"name": sample.name, "quarantine_dir": qdir})
+                app_mod._helper_restore_quarantine({"name": sample.name, "quarantine_dir": qdir})
+                self.assertEqual(sample.read_bytes(), b"sample")
+                self.assertEqual(sample.stat().st_uid, user.pw_uid)
+                self.assertEqual(stat.S_IMODE(sample.stat().st_mode), 0o640)
+
+    def test_restore_does_not_follow_swapped_destination_or_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch("os.geteuid", return_value=1000):
+            root = Path(tmpdir)
+            qdir = str(root / "quarantine")
+            folder = root / "destination"
+            folder.mkdir()
+            moved = root / "moved"
+            other = root / "other"
+            other.mkdir()
+            protected = other / "private.bin"
+            protected.write_bytes(b"keep")
+            sample = folder / protected.name
+            sample.write_bytes(b"sample")
+            sample.chmod(0o600)
+            app_mod._helper_quarantine_file({"path": str(sample), "quarantine_dir": qdir})
+            request = {"name": sample.name, "quarantine_dir": qdir}
+            sample.write_bytes(b"existing")
+            with self.assertRaises(FileExistsError):
+                app_mod._helper_restore_quarantine(request)
+            self.assertEqual(sample.read_bytes(), b"existing")
+            sample.unlink()
+
+            copy = app_mod.posix_files.copy_exclusive
+
+            def swap_directory(*args):
+                folder.rename(moved)
+                folder.symlink_to(other)
+                return copy(*args)
+
+            with (
+                mock.patch.object(app_mod.posix_files, "copy_exclusive", side_effect=swap_directory),
+                self.assertRaisesRegex(PermissionError, "directory changed"),
+            ):
+                app_mod._helper_restore_quarantine(request)
+            self.assertEqual(protected.read_bytes(), b"keep")
+            self.assertFalse((moved / sample.name).exists())
+            folder.unlink()
+            moved.rename(folder)
+            app_mod._helper_restore_quarantine(request)
+            self.assertEqual(stat.S_IMODE(sample.stat().st_mode), 0o600)
 
     def test_protected_system_paths_and_quarantine_root_confinement(self) -> None:
         for protected in ("/etc/passwd", "/usr/bin/python3", app_mod.SCRIPT_PATH):
@@ -1283,7 +1356,53 @@ class TestScheduleAndCancellation(unittest.TestCase):
 
 
 class TestWindowsCompatibility(unittest.TestCase):
-    """Cross-platform tests for Windows ClamAV discovery, freshclam auto-config, local helper, and Task Scheduler."""
+    """Tests for Windows process controls, discovery, updates, and scheduling."""
+
+    @unittest.skipUnless(os.name == "nt", "Requires native Win32 process controls")
+    def test_windows_suspend_and_resume_over_helper_pipes(self) -> None:
+        with ExitStack() as resources:
+            tmpdir = resources.enter_context(tempfile.TemporaryDirectory())
+            heartbeat = Path(tmpdir) / "heartbeat"
+            worker = subprocess.Popen([
+                sys.executable, "-c",
+                "import sys,time\n"
+                "with open(sys.argv[1], 'ab', buffering=0) as stream:\n"
+                " while True:\n"
+                "  stream.write(b'1')\n"
+                "  time.sleep(0.02)\n",
+                str(heartbeat),
+            ])
+            resources.callback(worker.wait)
+            resources.callback(worker.kill)
+            # Use the native OS controls on our test process with a helper bound to that PID.
+            helper_code = (
+                "import sys, clamav_gui as app\n"
+                "from unittest.mock import patch\n"
+                "bound_pid = int(sys.argv[1])\n"
+                "def check(pid):\n"
+                " if pid != bound_pid: raise PermissionError('Unregistered test process')\n"
+                "with patch.object(app, '_validate_clamscan_pid', check): app.run_helper()\n"
+            )
+            client = app_mod.HelperClient()
+            resources.callback(client.close)
+            with mock.patch.object(app_mod, "_self_helper_cmd", return_value=[
+                sys.executable, "-c", helper_code, str(worker.pid)
+            ]):
+                ok, message = client.start_local()
+            self.assertTrue(ok, message)
+            deadline = time.monotonic() + 5
+            while not heartbeat.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(heartbeat.exists())
+            self.assertTrue(client.call("signal_proc", {"pid": worker.pid, "sig": "SIGSTOP"})["paused"])
+            size_at_pause = heartbeat.stat().st_size
+            time.sleep(0.15)
+            self.assertEqual(heartbeat.stat().st_size, size_at_pause)
+            self.assertFalse(client.call("signal_proc", {"pid": worker.pid, "sig": "SIGCONT"})["paused"])
+            deadline = time.monotonic() + 5
+            while heartbeat.stat().st_size == size_at_pause and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertGreater(heartbeat.stat().st_size, size_at_pause)
 
     def test_win_clamav_dirs_and_default_db_dir(self) -> None:
         with mock.patch.dict(

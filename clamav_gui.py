@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from contextlib import contextmanager
 import csv
 import datetime
 import getpass
+import itertools
 import json
 import locale
 import os
@@ -16,7 +18,6 @@ try:
     import pwd
 except ImportError:  # Windows has no POSIX pwd database
     pwd = None  # type: ignore[assignment]
-import queue
 import re
 import shutil
 import signal
@@ -30,6 +31,22 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from clamav_backend import posix_files, posix_process, rpc
+from clamav_backend.posix_process import (
+    _inspect_proc_io,
+    parse_proc_stat,
+    parse_proc_status,
+    parse_proc_uptime,
+    read_proc_cmdline,
+)
+from clamav_backend.windows import (
+    _win32_get_io_counters,
+    _win32_get_proc_times_and_priority,
+    _win32_is_pid_running,
+    _win32_set_priority,
+    _win32_suspend_resume,
+)
 
 SCRIPT_PATH = str(Path(__file__).resolve())
 IS_WINDOWS = os.name == "nt"
@@ -52,7 +69,14 @@ def _is_posix_root() -> bool:
 def _self_helper_cmd() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "--helper"]
+    if _elevated_owner() is not None:
+        return _elevated_helper_cmd()
     return [sys.executable, SCRIPT_PATH, "--helper"]
+
+
+def _elevated_helper_cmd() -> list[str]:
+    # Match a fresh sudo/polkit authorization, never an old app-generated rule.
+    return [sys.executable, "-Es", SCRIPT_PATH, "--elevated-helper"]
 
 
 def _system_root_target() -> str:
@@ -131,7 +155,6 @@ else:
     DEFAULT_LOG_PATH = "/var/log/clamav-scan.log"
     DEFAULT_QUARANTINE_DIR = "/root/quarantine"
 QUARANTINE_MANIFEST = "manifest.json"
-POLKIT_RULE_PATH = "/etc/polkit-1/rules.d/49-clamav-kde-gui.rules"
 SYSTEMD_SERVICE_PATH = "/etc/systemd/system/clamav-gui-scan.service"
 SYSTEMD_TIMER_PATH = "/etc/systemd/system/clamav-gui-scan.timer"
 USER_SYSTEMD_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "systemd" / "user"
@@ -2502,242 +2525,10 @@ def extract_log_path_from_cmdline(args: list[str]) -> str:
     return DEFAULT_LOG_PATH if os.path.exists(DEFAULT_LOG_PATH) else ""
 
 
-def parse_proc_uptime() -> float:
-    """Read system uptime in seconds from /proc/uptime."""
-    try:
-        with open("/proc/uptime", "r", encoding="utf-8") as fh:
-            return float(fh.read().split()[0])
-    except OSError:
-        return 0.0
-
-
-def parse_proc_stat(pid: int) -> dict[str, Any] | None:
-    """Parse world-readable fields from /proc/<pid>/stat."""
-    try:
-        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read().strip()
-    except OSError:
-        return None
-
-    lparen = raw.find("(")
-    rparen = raw.rfind(")")
-    if lparen == -1 or rparen == -1 or rparen + 2 >= len(raw):
-        return None
-
-    comm = raw[lparen + 1 : rparen]
-    rest = raw[rparen + 2 :].split()
-    if len(rest) < 20:
-        return None
-
-    return {
-        "comm": comm,
-        "state": rest[0],
-        "ppid": int(rest[1]),
-        "utime": int(rest[11]),
-        "stime": int(rest[12]),
-        "priority": int(rest[15]),
-        "nice": int(rest[16]),
-        "threads": int(rest[17]),
-        "starttime": int(rest[19]),
-    }
-
-
-def parse_proc_status(pid: int) -> dict[str, Any]:
-    """Parse world-readable fields from /proc/<pid>/status."""
-    info: dict[str, Any] = {
-        "uid": None,
-        "user": "unknown",
-        "rss_kb": 0,
-        "voluntary_ctxt_switches": 0,
-        "nonvoluntary_ctxt_switches": 0,
-    }
-    try:
-        with open(f"/proc/{pid}/status", "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if line.startswith("Uid:"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        uid = int(parts[1])
-                        info["uid"] = uid
-                        try:
-                            info["user"] = pwd.getpwuid(uid).pw_name if pwd is not None else str(uid)
-                        except KeyError:
-                            info["user"] = str(uid)
-                elif line.startswith("VmRSS:"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        info["rss_kb"] = int(parts[1])
-                elif line.startswith("voluntary_ctxt_switches:"):
-                    info["voluntary_ctxt_switches"] = int(line.split(":", 1)[1].strip())
-                elif line.startswith("nonvoluntary_ctxt_switches:"):
-                    info["nonvoluntary_ctxt_switches"] = int(line.split(":", 1)[1].strip())
-    except OSError:
-        pass
-    return info
-
-
-def read_proc_cmdline(pid: int) -> list[str]:
-    """Read NUL-delimited /proc/<pid>/cmdline."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            raw = fh.read()
-        return [part.decode("utf-8", errors="replace") for part in raw.split(b"\x00") if part]
-    except OSError:
-        return []
-
-
 _SPAWNED_PROCS_LOCK = threading.Lock()
 _SPAWNED_PROCS: dict[int, subprocess.Popen[Any]] = {}
 _SPAWNED_PROCS_META: dict[int, dict[str, Any]] = {}
 _WINDOWS_PAUSED_PIDS: set[int] = set()
-
-
-def _win32_suspend_resume(pid: int, suspend: bool) -> None:
-    """Suspend or resume a Windows process via NtSuspendProcess / NtResumeProcess."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    handle = kernel32.OpenProcess(0x0800, False, int(pid))
-    if not handle:
-        raise ProcessLookupError(f"Process {pid} no longer exists")
-    try:
-        fn = ntdll.NtSuspendProcess if suspend else ntdll.NtResumeProcess
-        fn.argtypes = [wintypes.HANDLE]
-        fn.restype = ctypes.c_long
-        status = fn(handle)
-        if status < 0:
-            raise OSError(f"Failed changing Windows process state for PID {pid}: {status:#x}")
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _win32_set_priority(pid: int, mode: str) -> None:
-    """Adjust Windows process priority class ('normal', 'low', or 'idle')."""
-    import ctypes
-    from ctypes import wintypes
-
-    prio_map = {"normal": 0x00000020, "low": 0x00004000, "idle": 0x00000040}
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel32.SetPriorityClass.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    handle = kernel32.OpenProcess(0x0200, False, int(pid))
-    if not handle:
-        raise ProcessLookupError(f"Process {pid} no longer exists")
-    try:
-        if not kernel32.SetPriorityClass(handle, prio_map[mode]):
-            raise OSError(f"SetPriorityClass failed for PID {pid}")
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _win32_get_io_counters(pid: int) -> dict[str, int]:
-    """Read cumulative Windows process I/O transfer counters via GetProcessIoCounters."""
-    import ctypes
-    from ctypes import wintypes
-
-    class _IoCounters(ctypes.Structure):
-        _fields_ = [
-            ("ReadOperationCount", ctypes.c_uint64),
-            ("WriteOperationCount", ctypes.c_uint64),
-            ("OtherOperationCount", ctypes.c_uint64),
-            ("ReadTransferCount", ctypes.c_uint64),
-            ("WriteTransferCount", ctypes.c_uint64),
-            ("OtherTransferCount", ctypes.c_uint64),
-        ]
-
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.GetProcessIoCounters.argtypes = [wintypes.HANDLE, ctypes.POINTER(_IoCounters)]
-    kernel32.GetProcessIoCounters.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    handle = kernel32.OpenProcess(0x1000, False, int(pid))
-    if not handle:
-        return {}
-    try:
-        counters = _IoCounters()
-        if not kernel32.GetProcessIoCounters(handle, ctypes.byref(counters)):
-            return {}
-        read_b = int(counters.ReadTransferCount)
-        write_b = int(counters.WriteTransferCount)
-        return {"rchar": read_b, "wchar": write_b, "read_bytes": read_b, "write_bytes": write_b}
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _win32_get_proc_times_and_priority(pid: int) -> tuple[int, int, float]:
-    """Return (cpu_ticks_10ms, nice_equiv, elapsed_sec) for a Windows PID."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.GetPriorityClass.argtypes = [wintypes.HANDLE]
-    kernel32.GetPriorityClass.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    handle = kernel32.OpenProcess(0x1000, False, int(pid))
-    if not handle:
-        return 0, 0, 0.0
-    try:
-        prio = int(kernel32.GetPriorityClass(handle))
-        nice_eq = 19 if prio == 0x00000040 else (10 if prio == 0x00004000 else 0)
-        c_ft, e_ft, k_ft, u_ft = (
-            wintypes.FILETIME(),
-            wintypes.FILETIME(),
-            wintypes.FILETIME(),
-            wintypes.FILETIME(),
-        )
-        cpu_ticks = 0
-        elapsed = 0.0
-        if kernel32.GetProcessTimes(handle, ctypes.byref(c_ft), ctypes.byref(e_ft), ctypes.byref(k_ft), ctypes.byref(u_ft)):
-            k_100ns = (k_ft.dwHighDateTime << 32) | k_ft.dwLowDateTime
-            u_100ns = (u_ft.dwHighDateTime << 32) | u_ft.dwLowDateTime
-            c_100ns = (c_ft.dwHighDateTime << 32) | c_ft.dwLowDateTime
-            cpu_ticks = int((k_100ns + u_100ns) // 100_000)
-            created_unix = (c_100ns - 116444736000000000) / 10_000_000.0
-            elapsed = max(0.0, time.time() - created_unix) if created_unix > 0 else 0.0
-        return cpu_ticks, nice_eq, elapsed
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _win32_is_pid_running(pid: int) -> bool:
-    """Return True if a Windows PID currently exists and has exit code STILL_ACTIVE."""
-    if pid <= 0:
-        return False
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-    handle = kernel32.OpenProcess(0x1000, False, int(pid))
-    if not handle:
-        return False
-    try:
-        code = wintypes.DWORD(0)
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False
-        return int(code.value) == 259
-    finally:
-        kernel32.CloseHandle(handle)
 
 
 def _is_pid_running(pid: int) -> bool:
@@ -3560,24 +3351,16 @@ def _is_secure_root_owned_path(path: str) -> bool:
     return True
 
 
-def _resolve_invoking_username() -> str | None:
-    """Return username of the non-root caller under pkexec or sudo if present."""
-    if pwd is None:
+def _elevated_owner() -> int | None:
+    """Identify the caller of a delegated root helper using the elevation tool's UID."""
+    if IS_WINDOWS or IS_MACOS or _euid() != 0:
         return None
-    for env_key in ("PKEXEC_UID", "SUDO_UID"):
-        raw = os.environ.get(env_key, "").strip()
-        if raw.isdigit():
-            try:
-                return pwd.getpwuid(int(raw)).pw_name
-            except KeyError:
-                continue
-    sudo_user = os.environ.get("SUDO_USER", "").strip()
-    if sudo_user and sudo_user != "root":
-        try:
-            pwd.getpwnam(sudo_user)
-            return sudo_user
-        except KeyError:
-            pass
+    for key in ("PKEXEC_UID", "SUDO_UID"):
+        if key in os.environ:
+            raw = os.environ[key]
+            if not raw.isascii() or not raw.isdecimal() or int(raw) >= 2**32 - 1:
+                raise PermissionError(f"Invalid invoking identity in {key}")
+            return int(raw) or None
     return None
 
 
@@ -3585,15 +3368,18 @@ def _is_protected_system_path(target: str) -> bool:
     """Return True if target points to critical OS paths, polkit/systemd config, or this script."""
     if not target:
         return True
+    target = os.path.abspath(target)
     real = os.path.realpath(target)
     protected_exact = {
         os.path.realpath(SCRIPT_PATH),
-        os.path.realpath(POLKIT_RULE_PATH),
         os.path.realpath(SYSTEMD_SERVICE_PATH),
         os.path.realpath(SYSTEMD_TIMER_PATH),
         os.path.realpath(DEFAULT_QUARANTINE_DIR),
     }
     if target in protected_exact or real in protected_exact:
+        return True
+    quarantine_root = os.path.realpath(DEFAULT_QUARANTINE_DIR)
+    if any(path.startswith(quarantine_root + os.sep) for path in (target, real)):
         return True
     if IS_WINDOWS:
         win_prefixes = [
@@ -3692,6 +3478,12 @@ def _validate_clamscan_pid(pid: int) -> None:
         if _is_pid_running(pid):
             raise PermissionError(f"PID {pid} is not 'clamscan'")
         raise ProcessLookupError(f"Process {pid} no longer exists")
+    caller = _elevated_owner()
+    if caller is not None:
+        with _SPAWNED_PROCS_LOCK:
+            spawned = _SPAWNED_PROCS.get(pid)
+        if (spawned is None or spawned.poll() is not None) and os.stat(f"/proc/{pid}").st_uid != caller:
+            raise PermissionError("Cannot control a scan owned by another user")
     comm_path = f"/proc/{pid}/comm"
     if not os.path.exists(comm_path):
         raise ProcessLookupError(f"Process {pid} no longer exists")
@@ -3701,7 +3493,9 @@ def _validate_clamscan_pid(pid: int) -> None:
         raise PermissionError(f"PID {pid} is '{comm}', not 'clamscan'")
     try:
         exe_target = os.readlink(f"/proc/{pid}/exe")
-    except OSError:
+    except OSError as exc:
+        if caller is not None:
+            raise PermissionError("Cannot verify the scan executable") from exc
         exe_target = ""
     if exe_target:
         if os.path.basename(exe_target) != "clamscan":
@@ -3711,52 +3505,7 @@ def _validate_clamscan_pid(pid: int) -> None:
 
 
 def _inspect_proc_fds(pid: int) -> dict[str, Any]:
-    """Read /proc/<pid>/fd targets to determine the file currently being scanned."""
-    fd_dir = f"/proc/{pid}/fd"
-    real_files: list[str] = []
-    tmp_files: list[str] = []
-
-    try:
-        fd_names = sorted(os.listdir(fd_dir), key=lambda name: int(name) if name.isdigit() else 999999)
-    except OSError as exc:
-        return {"current_file": None, "open_files": [], "tmp_count": 0, "fd_error": str(exc)}
-
-    for fd_name in fd_names:
-        if fd_name in ("0", "1", "2"):
-            continue
-        try:
-            target = os.readlink(os.path.join(fd_dir, fd_name))
-        except OSError:
-            continue
-
-        if any(target.startswith(prefix) for prefix in EXCLUDED_FD_PREFIXES):
-            continue
-        if target.startswith("/tmp/clamav-"):
-            tmp_files.append(target)
-        else:
-            real_files.append(target)
-
-    current_file = real_files[-1] if real_files else (tmp_files[-1] if tmp_files else None)
-    return {
-        "current_file": current_file,
-        "open_files": (real_files + tmp_files)[:10],
-        "tmp_count": len(tmp_files),
-        "fd_error": None,
-    }
-
-
-def _inspect_proc_io(pid: int) -> dict[str, int]:
-    """Read byte counters from /proc/<pid>/io."""
-    io_stats: dict[str, int] = {}
-    try:
-        with open(f"/proc/{pid}/io", "r", encoding="utf-8") as fh:
-            for line in fh:
-                if ":" in line:
-                    key, val = line.split(":", 1)
-                    io_stats[key.strip()] = int(val.strip())
-    except OSError:
-        pass
-    return io_stats
+    return posix_process.inspect_linux_fds(pid, EXCLUDED_FD_PREFIXES)
 
 
 def _read_log_chunk(log_path: str, log_offset: int, max_bytes: int = 1048576) -> dict[str, Any]:
@@ -4008,39 +3757,7 @@ def build_systemd_schedule_units(
 
 
 def _inspect_macos_proc_fds(pid: int) -> dict[str, Any]:
-    """Read open files for clamscan on macOS via lsof when available."""
-    lsof_bin = shutil.which("lsof")
-    if not lsof_bin:
-        return {"current_file": None, "open_files": [], "tmp_count": 0, "fd_error": None}
-    real_files: list[str] = []
-    tmp_files: list[str] = []
-    mac_excluded = (*EXCLUDED_FD_PREFIXES, "/System/Library/", "/usr/lib/", "/private/var/db/", "/dev/")
-    try:
-        res = subprocess.run(
-            [lsof_bin, "-n", "-P", "-p", str(pid), "-Fn"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        for line in res.stdout.splitlines():
-            if not line.startswith("n/"):
-                continue
-            target = line[1:].strip()
-            if any(target.startswith(pref) for pref in mac_excluded):
-                continue
-            if target.startswith("/tmp/clamav-") or target.startswith("/private/tmp/clamav-"):
-                tmp_files.append(target)
-            else:
-                real_files.append(target)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"current_file": None, "open_files": [], "tmp_count": 0, "fd_error": str(exc)}
-    return {
-        "current_file": real_files[-1] if real_files else None,
-        "open_files": real_files[-10:],
-        "tmp_count": len(tmp_files),
-        "fd_error": None,
-    }
+    return posix_process.inspect_macos_fds(pid, EXCLUDED_FD_PREFIXES)
 
 
 def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
@@ -4049,6 +3766,11 @@ def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
     log_path = _validate_helper_log_path(raw_log) if raw_log else ""
     log_offset = int(params.get("log_offset") or 0)
     cmdline = params.get("cmdline")
+    if _elevated_owner() is not None:
+        cmdline = None
+        if isinstance(pid, int) and pid > 1 and _is_pid_running(pid):
+            _validate_clamscan_pid(pid)
+            cmdline = read_proc_cmdline(pid)
 
     if log_path:
         _ensure_log_readable(log_path)
@@ -4218,7 +3940,7 @@ def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
             cancel_background_precount()
             _terminate_pid_gracefully(pid, force_cont=True)
             _reap_spawned_proc(pid)
-        return {"pid": pid, "sig": sig_name}
+        return {"pid": pid, "sig": sig_name, "paused": sig_name == "SIGSTOP"}
 
     if sig_name == "SIGTERM":
         cancel_background_precount()
@@ -4368,6 +4090,8 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
             safe_log = _validate_helper_log_path(s.split("=", 1)[1])
             validated.append(f"--log={safe_log}")
         elif s.startswith("--move=") or s.startswith("--copy="):
+            if _elevated_owner() is not None:
+                raise PermissionError("Use Report only for elevated scans and review threats before taking action")
             flag_name, target_q = s.split("=", 1)
             safe_q = _resolve_quarantine_dir(target_q)
             validated.append(f"{flag_name}={safe_q}")
@@ -4715,13 +4439,79 @@ def _save_quarantine_manifest(qdir: str, manifest: dict[str, dict[str, Any]]) ->
     save_json_file(_quarantine_manifest_path(qdir), manifest)
 
 
-def _validate_quarantine_item_name(qdir: str, name: str) -> str:
-    if not name or os.path.basename(name) != name or name in (".", "..", QUARANTINE_MANIFEST):
+def _quarantine_item_name(name: str) -> str:
+    if (
+        not name or os.path.basename(name) != name or name in (".", "..", QUARANTINE_MANIFEST, ".lock")
+        or name.startswith(".manifest-") or "\x00" in name
+    ):
         raise ValueError(f"Invalid quarantine item name: {name}")
-    full = os.path.join(qdir, name)
-    if not (os.path.isfile(full) or os.path.islink(full)):
-        raise FileNotFoundError(f"Quarantined file not found: {full}")
-    return full
+    return name
+
+
+def _quarantine_names(base: str):
+    if base not in (QUARANTINE_MANIFEST, ".lock") and not base.startswith(".manifest-"):
+        yield base
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Use a safe base even when the source name is reserved for the manifest.
+    base = "quarantined-file" if base.startswith(".manifest-") else base
+    yield f"{base}.{stamp}"
+    for suffix in itertools.count(1):
+        yield f"{base}.{stamp}.{suffix}"
+
+
+@contextmanager
+def _posix_quarantine(qdir: str, *, create: bool = False):
+    with posix_files.directory(qdir, create=create) as fd:
+        if _is_posix_root():
+            if os.fstat(fd).st_uid != 0:
+                raise PermissionError("Elevated quarantine must be owned by root")
+            os.fchmod(fd, 0o700)
+        with posix_files.locked_quarantine(fd):
+            yield fd, posix_files.read_manifest(fd, QUARANTINE_MANIFEST)
+
+
+def _quarantine_metadata(src: str, threat_name: str, info: os.stat_result) -> dict[str, Any]:
+    return {
+        "original_path": src,
+        "threat_name": threat_name,
+        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "size": info.st_size,
+        "mode": stat.S_IMODE(info.st_mode) & 0o777,
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+    }
+
+
+def _check_file_owner(uid: int | None, actual: int) -> None:
+    if uid is not None and uid != actual:
+        raise PermissionError("Elevated file actions are limited to files owned by the invoking user")
+
+
+def _unlink_scoped(fd: int, name: str, info: os.stat_result, uid: int | None = None) -> None:
+    if not posix_files.same_entry(fd, name, info):
+        raise PermissionError(f"File changed before removal: {name}")
+    if uid is None:
+        os.unlink(name, dir_fd=fd)
+        return
+    # Let the kernel enforce the caller's actual directory and sticky-bit permissions.
+    if pwd is None:
+        raise PermissionError("Cannot resolve invoking user")
+    user = pwd.getpwuid(uid)
+    result = subprocess.run(
+        [
+            sys.executable, "-IS", "-c",
+            "import os, sys\n"
+            "fd, name, dev, ino = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])\n"
+            "st = os.stat(name, dir_fd=fd, follow_symlinks=False)\n"
+            "if (st.st_dev, st.st_ino) != (dev, ino): sys.exit(1)\n"
+            "os.unlink(name, dir_fd=fd)\n",
+            str(fd), name, str(info.st_dev), str(info.st_ino),
+        ],
+        user=uid, group=user.pw_gid, extra_groups=os.getgrouplist(user.pw_name, user.pw_gid),
+        pass_fds=(fd,), capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise PermissionError(f"Invoking user could not remove: {name}")
 
 
 def _helper_quarantine_file(params: dict[str, Any]) -> dict[str, Any]:
@@ -4732,159 +4522,166 @@ def _helper_quarantine_file(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Source path must be absolute")
     if _is_protected_system_path(src):
         raise PermissionError(f"Refusing to quarantine protected system path: {src}")
-    if not (os.path.isfile(src) or os.path.islink(src)):
-        raise FileNotFoundError(f"File not found: {src}")
 
-    os.makedirs(qdir, mode=0o700, exist_ok=True)
-    if os.path.islink(qdir):
-        raise PermissionError(f"Refusing symlink quarantine directory: {qdir}")
-    if (not IS_WINDOWS) and _euid() == 0 and os.lstat(qdir).st_uid != 0:
-        raise PermissionError(f"Quarantine directory must be owned by root: {qdir}")
-    if not IS_WINDOWS:
-        os.chmod(qdir, 0o700)
-
-    try:
-        file_size = os.path.getsize(src) if os.path.isfile(src) and not os.path.islink(src) else 0
-    except OSError:
-        file_size = 0
-
-    base = os.path.basename(src)
-    dest = os.path.join(qdir, base)
-    if os.path.lexists(dest):
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        candidate = os.path.join(qdir, f"{base}.{stamp}")
-        suffix = 1
-        while os.path.lexists(candidate):
-            candidate = os.path.join(qdir, f"{base}.{stamp}.{suffix}")
-            suffix += 1
-        dest = candidate
-
-    shutil.move(src, dest)
-    if not os.path.islink(dest):
+    parent, base = os.path.split(src)
+    if IS_WINDOWS:
+        info = os.stat(src, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            raise PermissionError("Only regular files can be quarantined")
+        os.makedirs(qdir, mode=0o700, exist_ok=True)
+        qname = next(name for name in _quarantine_names(base) if not os.path.lexists(os.path.join(qdir, name)))
+        dest = os.path.join(qdir, qname)
+        shutil.move(src, dest)
         os.chmod(dest, 0o600)
-    qname = os.path.basename(dest)
-    manifest = _load_quarantine_manifest(qdir)
-    manifest[qname] = {
-        "original_path": src,
-        "threat_name": threat_name,
-        "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "size": file_size,
-    }
-    _save_quarantine_manifest(qdir, manifest)
+        manifest = _load_quarantine_manifest(qdir)
+        manifest[qname] = _quarantine_metadata(src, threat_name, info)
+        _save_quarantine_manifest(qdir, manifest)
+    else:
+        uid = _elevated_owner()
+        with (
+            posix_files.directory(parent) as source_fd,
+            posix_files.regular_file(source_fd, base) as (source, info),
+            _posix_quarantine(qdir, create=True) as (qfd, manifest),
+        ):
+            _check_file_owner(uid, info.st_uid)
+            for qname in _quarantine_names(base):
+                try:
+                    posix_files.copy_exclusive(source, qfd, qname, 0o600)
+                    break
+                except FileExistsError:
+                    continue
+            manifest[qname] = _quarantine_metadata(src, threat_name, info)
+            try:
+                posix_files.write_manifest(qfd, QUARANTINE_MANIFEST, manifest)
+                _unlink_scoped(source_fd, base, info, uid)
+            except BaseException:
+                os.unlink(qname, dir_fd=qfd)
+                manifest.pop(qname)
+                posix_files.write_manifest(qfd, QUARANTINE_MANIFEST, manifest)
+                raise
+        dest = os.path.join(qdir, qname)
     return {"src": src, "dest": dest, "name": qname}
+
+
+def _quarantine_items(names, stat_entry, manifest: dict, uid: int | None) -> list[dict[str, Any]]:
+    items = []
+    for name in names:
+        try:
+            _quarantine_item_name(name)
+            info = stat_entry(name)
+        except (ValueError, FileNotFoundError):
+            continue
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            continue
+        meta = manifest.get(name) or {}
+        if uid is not None and meta.get("uid", info.st_uid) != uid:
+            continue
+        items.append({
+            "name": name,
+            "original_path": str(meta.get("original_path") or "Unknown"),
+            "threat_name": str(meta.get("threat_name") or "Unknown"),
+            "date": str(meta.get("date") or datetime.datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S")),
+            "size": info.st_size,
+        })
+    return sorted(items, key=lambda item: item["date"], reverse=True)
 
 
 def _helper_list_quarantine(params: dict[str, Any]) -> dict[str, Any]:
     qdir = _resolve_quarantine_dir(params.get("quarantine_dir"))
-    if not os.path.isdir(qdir):
-        return {"items": []}
-
-    manifest = _load_quarantine_manifest(qdir)
-    items: list[dict[str, Any]] = []
-    for name in sorted(os.listdir(qdir)):
-        if name == QUARANTINE_MANIFEST:
-            continue
-        full = os.path.join(qdir, name)
-        if not (os.path.isfile(full) or os.path.islink(full)):
-            continue
-        meta = manifest.get(name) or {}
-        try:
-            st = os.lstat(full)
-            size = int(meta.get("size") or st.st_size)
-            date_str = str(
-                meta.get("date")
-                or datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        if IS_WINDOWS:
+            items = _quarantine_items(
+                os.listdir(qdir), lambda name: os.lstat(os.path.join(qdir, name)), _load_quarantine_manifest(qdir), None
             )
-        except OSError:
-            size = int(meta.get("size") or 0)
-            date_str = str(meta.get("date") or "Unknown")
-
-        items.append(
-            {
-                "name": name,
-                "original_path": str(meta.get("original_path") or "Unknown"),
-                "threat_name": str(meta.get("threat_name") or "Unknown"),
-                "date": date_str,
-                "size": size,
-            }
-        )
-
-    items.sort(key=lambda item: item["date"], reverse=True)
+        else:
+            with _posix_quarantine(qdir) as (fd, manifest):
+                items = _quarantine_items(
+                    os.listdir(fd), lambda name: os.stat(name, dir_fd=fd, follow_symlinks=False), manifest, _elevated_owner()
+                )
+    except FileNotFoundError:
+        items = []
     return {"items": items}
 
 
-def _ensure_no_symlink_ancestors_and_mkdir(directory: str) -> None:
-    """Create missing directories along an absolute path while rejecting any symlink ancestor."""
-    parts = Path(os.path.abspath(directory)).parts
-    if not parts:
-        return
-    cur = Path(parts[0])
-    for part in parts[1:]:
-        cur = cur / part
-        if cur.is_symlink():
-            raise PermissionError(f"Refusing to restore across symlink directory: {cur}")
-        if not cur.exists():
-            cur.mkdir(mode=0o755, exist_ok=True)
-        elif not cur.is_dir():
-            raise NotADirectoryError(f"Non-directory ancestor in restore path: {cur}")
+def _restore_destination(params: dict[str, Any], meta: dict) -> str:
+    dest = str(params.get("dest_path") or meta.get("original_path") or "")
+    if "\x00" in dest or not os.path.isabs(dest) or not os.path.basename(dest):
+        raise ValueError("Valid absolute destination path required to restore file")
+    if _is_protected_system_path(dest):
+        raise PermissionError(f"Refusing to restore into protected system path: {dest}")
+    return dest
+
+
+def _restore_mode(meta: dict) -> int:
+    mode = meta.get("mode")
+    return mode if type(mode) is int and 0 <= mode <= 0o777 else 0o600
 
 
 def _helper_restore_quarantine(params: dict[str, Any]) -> dict[str, Any]:
     qdir = _resolve_quarantine_dir(params.get("quarantine_dir"))
-    name = str(params["name"])
-    src = _validate_quarantine_item_name(qdir, name)
-
-    manifest = _load_quarantine_manifest(qdir)
-    meta = manifest.get(name) or {}
-    orig_path = str(meta.get("original_path") or "").strip()
-    requested_dest = str(params.get("dest_path") or "").strip()
-    dest = requested_dest or orig_path
-    if not dest or dest == "Unknown" or "\x00" in dest or not os.path.isabs(dest):
-        raise ValueError("Valid absolute destination path required to restore file.")
-    if _is_protected_system_path(dest):
-        raise PermissionError(f"Refusing to restore into protected system path: {dest}")
-
-    invoker = _resolve_invoking_username()
-    if (not IS_WINDOWS) and _euid() == 0 and requested_dest and requested_dest != orig_path:
-        # Custom destination overrides may only restore into the invoking user's home or recorded path
-        if not invoker or not os.path.realpath(requested_dest).startswith(f"/home/{invoker}/"):
-            raise PermissionError("Custom restore destination must stay inside caller's home directory.")
-
-    if os.path.lexists(dest):
-        raise FileExistsError(f"Destination already exists: {dest}")
-
-    parent = os.path.dirname(dest)
-    if parent:
-        _ensure_no_symlink_ancestors_and_mkdir(parent)
-
-    shutil.move(src, dest)
-    if (not IS_WINDOWS) and dest.startswith("/home/") and pwd is not None:
-        parts = Path(dest).parts
-        if len(parts) >= 3:
-            target_user = parts[2]
-            # Only restore user ownership if original location also belonged to that user's home
-            if orig_path.startswith(f"/home/{target_user}/"):
+    name = _quarantine_item_name(str(params["name"]))
+    if IS_WINDOWS:
+        manifest = _load_quarantine_manifest(qdir)
+        meta = manifest.get(name) or {}
+        dest = _restore_destination(params, meta)
+        src = os.path.join(qdir, name)
+        if not stat.S_ISREG(os.lstat(src).st_mode):
+            raise PermissionError("Only regular quarantine files can be restored")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(src, "rb") as source, open(dest, "xb") as output:
+            shutil.copyfileobj(source, output)
+        os.chmod(dest, _restore_mode(meta))
+        os.unlink(src)
+        manifest.pop(name, None)
+        _save_quarantine_manifest(qdir, manifest)
+    else:
+        uid = _elevated_owner()
+        with _posix_quarantine(qdir) as (qfd, manifest), posix_files.regular_file(qfd, name) as (source, info):
+            meta = manifest.get(name) or {}
+            owner = int(meta.get("uid", info.st_uid))
+            _check_file_owner(uid, owner)
+            dest = _restore_destination(params, meta)
+            parent, dest_name = os.path.split(dest)
+            with posix_files.directory(parent, create=uid is None) as dest_fd:
+                if uid is not None:
+                    directory_info = os.fstat(dest_fd)
+                    if directory_info.st_uid != uid or directory_info.st_mode & 0o300 != 0o300:
+                        raise PermissionError("Restore destination must be a writable directory owned by the invoking user")
+                ownership = (owner, int(meta.get("gid", info.st_gid))) if _is_posix_root() else None
+                restored = posix_files.copy_exclusive(source, dest_fd, dest_name, _restore_mode(meta), ownership)
                 try:
-                    pw = pwd.getpwnam(target_user)
-                    os.chown(dest, pw.pw_uid, pw.pw_gid)
-                    if not os.path.islink(dest):
-                        os.chmod(dest, 0o644)
-                except (KeyError, OSError):
-                    pass
-
-    manifest.pop(name, None)
-    _save_quarantine_manifest(qdir, manifest)
+                    if not os.path.samestat(os.fstat(dest_fd), os.stat(parent, follow_symlinks=False)):
+                        raise PermissionError("Restore directory changed during the copy")
+                    manifest.pop(name, None)
+                    posix_files.write_manifest(qfd, QUARANTINE_MANIFEST, manifest)
+                    _unlink_scoped(qfd, name, info)
+                except BaseException:
+                    if posix_files.same_entry(dest_fd, dest_name, restored):
+                        os.unlink(dest_name, dir_fd=dest_fd)
+                    if meta and name not in manifest:
+                        manifest[name] = meta
+                        posix_files.write_manifest(qfd, QUARANTINE_MANIFEST, manifest)
+                    raise
     return {"name": name, "restored_to": dest}
 
 
 def _helper_delete_quarantine(params: dict[str, Any]) -> dict[str, Any]:
     qdir = _resolve_quarantine_dir(params.get("quarantine_dir"))
-    name = str(params["name"])
-    src = _validate_quarantine_item_name(qdir, name)
-    os.unlink(src)
-    manifest = _load_quarantine_manifest(qdir)
-    manifest.pop(name, None)
-    _save_quarantine_manifest(qdir, manifest)
+    name = _quarantine_item_name(str(params["name"]))
+    if IS_WINDOWS:
+        os.unlink(os.path.join(qdir, name))
+        manifest = _load_quarantine_manifest(qdir)
+        manifest.pop(name, None)
+        _save_quarantine_manifest(qdir, manifest)
+    else:
+        with _posix_quarantine(qdir) as (qfd, manifest):
+            info = os.stat(name, dir_fd=qfd, follow_symlinks=False)
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                raise PermissionError("Invalid quarantine item type")
+            _check_file_owner(_elevated_owner(), (manifest.get(name) or {}).get("uid", info.st_uid))
+            _unlink_scoped(qfd, name, info)
+            manifest.pop(name, None)
+            posix_files.write_manifest(qfd, QUARANTINE_MANIFEST, manifest)
     return {"deleted": name}
 
 
@@ -4894,52 +4691,18 @@ def _helper_delete_file(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Target path must be absolute")
     if _is_protected_system_path(target):
         raise PermissionError(f"Refusing to delete protected system path: {target}")
-    if not (os.path.isfile(target) or os.path.islink(target)):
-        raise FileNotFoundError(f"File not found: {target}")
-    os.unlink(target)
+    if IS_WINDOWS:
+        os.unlink(target)
+    else:
+        parent, name = os.path.split(target)
+        uid = _elevated_owner()
+        with posix_files.directory(parent) as fd:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                raise PermissionError("Only files and their links can be deleted")
+            _check_file_owner(uid, info.st_uid)
+            _unlink_scoped(fd, name, info, uid)
     return {"deleted": target}
-
-
-def _helper_install_polkit_rule(params: dict[str, Any]) -> dict[str, Any]:
-    if IS_WINDOWS or pwd is None:
-        return {"rule_path": "", "username": ""}
-    invoker = _resolve_invoking_username()
-    username = invoker or str(params.get("username") or "").strip()
-    if not username:
-        raise ValueError("username is required")
-    if invoker and params.get("username") and str(params.get("username")).strip() != invoker:
-        raise PermissionError("Polkit rule can only be installed for the invoking user")
-    pwd.getpwnam(username)
-
-    if _euid() == 0:
-        if not _is_secure_root_owned_path(SCRIPT_PATH):
-            raise PermissionError(
-                f"Refusing to install passwordless Polkit rule for user-writable script: {SCRIPT_PATH}"
-            )
-        if not _is_secure_root_owned_path(os.path.realpath(sys.executable)):
-            raise PermissionError("Refusing to install passwordless Polkit rule for untrusted python binary")
-
-    progs = sorted({sys.executable, os.path.realpath(sys.executable)})
-    prog_checks = " || ".join(f'action.lookup("program") == {json.dumps(p)}' for p in progs)
-    cmd_checks = " || ".join(
-        f'action.lookup("command_line") == {json.dumps(f"{p} {SCRIPT_PATH} --helper")}' for p in progs
-    )
-    rule_js = (
-        "polkit.addRule(function(action, subject) {\n"
-        '    if (action.id == "org.freedesktop.policykit.exec" &&\n'
-        "        subject.active && subject.local &&\n"
-        f"        subject.user == {json.dumps(username)} &&\n"
-        f"        ({prog_checks}) &&\n"
-        f"        ({cmd_checks})) {{\n"
-        "        return polkit.Result.YES;\n"
-        "    }\n"
-        "});\n"
-    )
-    os.makedirs(os.path.dirname(POLKIT_RULE_PATH), exist_ok=True)
-    with open(POLKIT_RULE_PATH, "w", encoding="utf-8") as fh:
-        fh.write(rule_js)
-    os.chmod(POLKIT_RULE_PATH, 0o644)
-    return {"rule_path": POLKIT_RULE_PATH, "username": username}
 
 
 def _helper_windows_get_schedule() -> dict[str, Any]:
@@ -5326,33 +5089,13 @@ HELPER_HANDLERS = {
     "restore_quarantine": _helper_restore_quarantine,
     "delete_quarantine": _helper_delete_quarantine,
     "delete_file": _helper_delete_file,
-    "install_polkit_rule": _helper_install_polkit_rule,
     "get_schedule": _helper_get_schedule,
     "set_schedule": _helper_set_schedule,
 }
 
 
 def run_helper() -> int:
-    """Run headless JSON-over-stdin/stdout privileged helper."""
-    print(json.dumps({"type": "ready", "uid": _euid()}), flush=True)
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        req_id = None
-        try:
-            req = json.loads(line)
-            req_id = req.get("id")
-            action = req.get("action")
-            handler = HELPER_HANDLERS.get(action)
-            if handler is None:
-                raise ValueError(f"Unknown action: {action}")
-            result = handler(req.get("params") or {})
-            resp = {"id": req_id, "ok": True, "result": result}
-        except Exception as exc:  # noqa: BLE001
-            resp = {"id": req_id, "ok": False, "error": str(exc)}
-        print(json.dumps(resp), flush=True)
-    return 0
+    return rpc.serve(HELPER_HANDLERS, _euid())
 
 
 def run_self_test() -> int:
@@ -5453,7 +5196,7 @@ def run_self_test() -> int:
                     {
                         "id": 2,
                         "action": "inspect_proc",
-                        "params": {"pid": os.getpid(), "log_path": test_log_path, "log_offset": 0},
+                        "params": {"pid": None, "log_path": test_log_path, "log_offset": 0},
                     }
                 )
                 + "\n"
@@ -5482,298 +5225,14 @@ def run_self_test() -> int:
     return 0
 
 
-class HelperClient:
-    """Thread-safe JSON RPC client communicating with the privileged helper."""
-
+class HelperClient(rpc.HelperClient):
     def __init__(self) -> None:
-        self._proc: subprocess.Popen[str] | None = None
-        self._lock = threading.Lock()
-        self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
-        self._next_id = 1
-        self._reader_thread: threading.Thread | None = None
-        self.uid: int | None = None
-        self.on_disconnect = None
-
-    @property
-    def is_connected(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None and self.uid is not None
-
-    @property
-    def is_root(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None and (self.uid == 0 or IS_WINDOWS or IS_MACOS)
-
-    @property
-    def is_user_mode(self) -> bool:
-        return (
-            self._proc is not None
-            and self._proc.poll() is None
-            and self.uid is not None
-            and self.uid != 0
-            and not IS_WINDOWS
-            and not IS_MACOS
+        super().__init__(
+            lambda: _self_helper_cmd(),
+            lambda: _elevated_helper_cmd(),
+            lambda: IS_WINDOWS or IS_MACOS,
+            _SUBPROCESS_NO_WINDOW,
         )
-
-    def close(self) -> None:
-        with self._lock:
-            proc = self._proc
-            self._proc = None
-            self.uid = None
-        if proc is not None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except OSError:
-                pass
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=1)
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    try:
-                        pipe.close()
-                    except OSError:
-                        pass
-
-    def _spawn_auth_process(self, cmd: list[str]) -> tuple[subprocess.Popen[str] | None, str]:
-        """Spawn a helper or auth wrapper process cleanly, handling missing binaries."""
-        try:
-            popen_kwargs: dict[str, Any] = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "text": True,
-                "bufsize": 1,
-            }
-            if IS_WINDOWS:
-                popen_kwargs["creationflags"] = _SUBPROCESS_NO_WINDOW
-            proc = subprocess.Popen(cmd, **popen_kwargs)
-            return proc, ""
-        except OSError as exc:
-            return None, f"Failed to launch {cmd[0]}: {exc}"
-
-    def start_local(self) -> tuple[bool, str]:
-        """Spawn the local JSON-RPC helper directly without sudo or pkexec."""
-        self.close()
-        proc, spawn_err = self._spawn_auth_process(_self_helper_cmd())
-        if proc is None:
-            return False, spawn_err
-        assert proc.stdout is not None
-        line = proc.stdout.readline()
-        if line.strip().startswith("{"):
-            try:
-                msg = json.loads(line.strip())
-                if msg.get("type") == "ready":
-                    self._attach(proc, int(msg.get("uid", 0)))
-                    return True, "Local helper active."
-            except (json.JSONDecodeError, ValueError):
-                pass
-        if proc.poll() is None:
-            proc.terminate()
-        return False, "Local helper did not report ready."
-
-    def start_with_sudo(self, password: str) -> tuple[bool, str]:
-        """Spawn helper using sudo -k -S and validate root readiness."""
-        self.close()
-        cmd = ["sudo", "-k", "-S", "-p", "", *_self_helper_cmd()]
-        proc, spawn_err = self._spawn_auth_process(cmd)
-        if proc is None:
-            return False, spawn_err
-        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
-
-        stderr_lines: list[str] = []
-        ready_q: queue.Queue[tuple[str, Any]] = queue.Queue()
-
-        def _watch_stdout() -> None:
-            while True:
-                line = proc.stdout.readline()  # type: ignore[union-attr]
-                if not line:
-                    ready_q.put(("stdout_eof", None))
-                    return
-                stripped = line.strip()
-                if stripped.startswith("{"):
-                    try:
-                        msg = json.loads(stripped)
-                        if msg.get("type") == "ready":
-                            ready_q.put(("ready", msg))
-                            return
-                    except json.JSONDecodeError:
-                        pass
-
-        def _watch_stderr() -> None:
-            while True:
-                line = proc.stderr.readline()  # type: ignore[union-attr]
-                if not line:
-                    return
-                text = line.strip()
-                if text:
-                    stderr_lines.append(text)
-                    ready_q.put(("stderr", text))
-
-        threading.Thread(target=_watch_stdout, daemon=True).start()
-        threading.Thread(target=_watch_stderr, daemon=True).start()
-
-        try:
-            proc.stdin.write(password + "\n")
-            proc.stdin.flush()
-        except OSError as exc:
-            proc.terminate()
-            return False, f"Failed writing password to sudo: {exc}"
-
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            remaining = max(0.05, deadline - time.monotonic())
-            try:
-                kind, payload = ready_q.get(timeout=min(0.4, remaining))
-            except queue.Empty:
-                if proc.poll() is not None:
-                    break
-                continue
-
-            if kind == "ready":
-                uid = int(payload.get("uid", -1))
-                if uid == 0:
-                    self._attach(proc, uid)
-                    return True, "Root helper active (sudo)."
-                proc.terminate()
-                return False, f"Helper started with unexpected UID {uid}."
-
-            if kind == "stderr":
-                # Give stdout a brief grace window in case sudo printed a notice and still succeeded
-                time.sleep(0.25)
-                try:
-                    kind2, payload2 = ready_q.get_nowait()
-                    if kind2 == "ready" and int(payload2.get("uid", -1)) == 0:
-                        self._attach(proc, 0)
-                        return True, "Root helper active (sudo)."
-                except queue.Empty:
-                    pass
-                proc.terminate()
-                return False, " ".join(stderr_lines) or "Authentication failed."
-
-            if kind == "stdout_eof":
-                break
-
-        proc.terminate()
-        err = " ".join(stderr_lines).strip()
-        return False, err or "Timed out waiting for sudo authentication."
-
-    def start_with_sudo_nopass(self) -> tuple[bool, str]:
-        """Attempt non-interactive sudo -n helper launch if credentials are cached or NOPASSWD."""
-        self.close()
-        cmd = ["sudo", "-n", *_self_helper_cmd()]
-        proc, spawn_err = self._spawn_auth_process(cmd)
-        if proc is None:
-            return False, spawn_err
-        assert proc.stdout is not None and proc.stderr is not None
-        line = proc.stdout.readline()
-        if line.strip().startswith("{"):
-            try:
-                msg = json.loads(line.strip())
-                if msg.get("type") == "ready" and int(msg.get("uid", -1)) == 0:
-                    self._attach(proc, 0)
-                    return True, "Root helper active (sudo cached)."
-            except json.JSONDecodeError:
-                pass
-        if proc.poll() is None:
-            proc.terminate()
-        return False, "Non-interactive sudo unavailable."
-
-    def start_with_pkexec(self) -> tuple[bool, str]:
-        """Spawn helper via pkexec (triggers KDE Polkit prompt)."""
-        self.close()
-        cmd = ["pkexec", *_self_helper_cmd()]
-        proc, spawn_err = self._spawn_auth_process(cmd)
-        if proc is None:
-            return False, spawn_err
-        assert proc.stdout is not None and proc.stderr is not None
-
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                err = proc.stderr.read().strip()
-                rc = proc.wait()
-                if rc in (126, 127) and not err:
-                    err = "Polkit authentication was cancelled or unavailable."
-                return False, err or f"pkexec exited with code {rc}."
-            stripped = line.strip()
-            if stripped.startswith("{"):
-                try:
-                    msg = json.loads(stripped)
-                    if msg.get("type") == "ready":
-                        uid = int(msg.get("uid", -1))
-                        if uid == 0:
-                            self._attach(proc, uid)
-                            return True, "Root helper active (pkexec)."
-                        proc.terminate()
-                        return False, f"Helper started with unexpected UID {uid}."
-                except json.JSONDecodeError:
-                    continue
-
-    def _attach(self, proc: subprocess.Popen[str], uid: int) -> None:
-        with self._lock:
-            self._proc = proc
-            self.uid = uid
-        self._reader_thread = threading.Thread(target=self._read_loop, args=(proc,), daemon=True)
-        self._reader_thread.start()
-
-    def _read_loop(self, proc: subprocess.Popen[str]) -> None:
-        assert proc.stdout is not None
-        for raw_line in proc.stdout:
-            line = raw_line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            req_id = msg.get("id")
-            with self._lock:
-                waiter = self._pending.pop(req_id, None)
-            if waiter is not None:
-                waiter.put(msg)
-
-        with self._lock:
-            if self._proc is proc:
-                self._proc = None
-                self.uid = None
-            pending_items = list(self._pending.values())
-            self._pending.clear()
-        for waiter in pending_items:
-            waiter.put({"ok": False, "error": "Root helper disconnected."})
-        if self.on_disconnect is not None:
-            self.on_disconnect()
-
-    def call(self, action: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
-        """Execute a synchronous RPC request against the running helper."""
-        waiter: queue.Queue[dict[str, Any]] = queue.Queue()
-        with self._lock:
-            if self._proc is None or self._proc.poll() is not None or self._proc.stdin is None:
-                raise RuntimeError("Root access is not unlocked.")
-            req_id = self._next_id
-            self._next_id += 1
-            self._pending[req_id] = waiter
-            payload = json.dumps({"id": req_id, "action": action, "params": params or {}}) + "\n"
-            try:
-                self._proc.stdin.write(payload)
-                self._proc.stdin.flush()
-            except OSError as exc:
-                self._pending.pop(req_id, None)
-                raise RuntimeError(f"Failed sending request to helper: {exc}") from exc
-
-        try:
-            resp = waiter.get(timeout=timeout)
-        except queue.Empty as exc:
-            with self._lock:
-                self._pending.pop(req_id, None)
-            raise TimeoutError(f"Helper request '{action}' timed out.") from exc
-
-        if not resp.get("ok"):
-            raise RuntimeError(str(resp.get("error") or f"Action '{action}' failed"))
-        return dict(resp.get("result") or {})
 
 
 def _find_binary_path(name: str, fallbacks: tuple[str, ...] = ()) -> str | None:
@@ -6087,7 +5546,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
     class AsyncSignals(QObject):
         pkexec_done = Signal(bool, str, bool)
-        auto_sudo_done = Signal(bool)
+        local_helper_ready = Signal()
         helper_disconnected = Signal()
         inspect_done = Signal(object, str)
         freshclam_done = Signal(bool, str)
@@ -6099,7 +5558,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
     def _apply_card_shadow(widget: Any, dark: bool) -> None:
-        if dark:
+        # Qt's X11 backing store can crash when compositing widget graphics effects.
+        if dark or QApplication.platformName() == "xcb":
             return
         eff = QGraphicsDropShadowEffect(widget)
         eff.setBlurRadius(22)
@@ -6593,13 +6053,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._last_pct: float = 0.0
             self._last_eta_str: str = "--:--:--"
             self._pending_scan_labels: dict[int, str] = {}
+            self._windows_paused_pids: set[int] = set()
             self._last_meta: dict[str, Any] = {}
             self._log_reload_error: str = ""
             self._last_about_dialog: QDialog | None = None
 
             self.helper.on_disconnect = self.signals.helper_disconnected.emit
             self.signals.pkexec_done.connect(self._on_pkexec_done)
-            self.signals.auto_sudo_done.connect(self._on_auto_sudo_done)
+            self.signals.local_helper_ready.connect(self._on_root_unlocked)
             self.signals.helper_disconnected.connect(self._on_helper_disconnected)
             self.signals.inspect_done.connect(self._on_inspect_done)
             self.signals.freshclam_done.connect(self._on_freshclam_done)
@@ -7899,6 +7360,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._tray_icon.setToolTip(tip)
 
         def _update_controls_enabled(self) -> None:
+            report_only = (
+                not IS_WINDOWS and not IS_MACOS and self.helper.is_root
+                and (_euid() != 0 or _elevated_owner() is not None)
+            )
+            if report_only:
+                self.infected_action_combo.setCurrentIndex(0)
+            self.infected_action_combo.setEnabled(not report_only)
+
             proc = self._current_proc
             has_proc = proc is not None
             self.ctrl_box.setVisible(has_proc)
@@ -7945,44 +7414,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         def _try_auto_connect(self) -> None:
             if self.helper.is_connected:
                 return
-            settings = load_json_file(SETTINGS_FILE_PATH, {})
-            has_polkit_rule = (
-                (not IS_WINDOWS)
-                and (not IS_MACOS)
-                and (os.path.exists(POLKIT_RULE_PATH) or bool(settings.get("polkit_rule_installed")))
-            )
+            if IS_WINDOWS or IS_MACOS or _euid() == 0:
+                def _auto_worker() -> None:
+                    ok, _ = self.helper.start_local()
+                    if ok:
+                        self.signals.local_helper_ready.emit()
 
-            def _auto_worker() -> None:
-                if IS_WINDOWS or IS_MACOS or _euid() == 0:
-                    ok_local, _ = self.helper.start_local()
-                    if ok_local:
-                        self.signals.auto_sudo_done.emit(True)
-                    return
-                ok_sudo, _ = self.helper.start_with_sudo_nopass()
-                if ok_sudo:
-                    self.signals.auto_sudo_done.emit(True)
-                    return
-                if has_polkit_rule:
-                    ok_pk, msg_pk = self.helper.start_with_pkexec()
-                    self.signals.pkexec_done.emit(ok_pk, msg_pk, True)
-
-            threading.Thread(target=_auto_worker, daemon=True).start()
-
-        def _on_auto_sudo_done(self, ok: bool) -> None:
-            if ok:
-                self._on_root_unlocked()
-
-        def _install_polkit_rule_best_effort(self) -> None:
-            try:
-                username = getpass.getuser()
-                self.helper.call("install_polkit_rule", {"username": username})
-                settings = load_json_file(SETTINGS_FILE_PATH, {})
-                if not isinstance(settings, dict):
-                    settings = {}
-                settings["polkit_rule_installed"] = True
-                save_json_file(SETTINGS_FILE_PATH, settings)
-            except Exception:  # noqa: BLE001
-                pass
+                threading.Thread(target=_auto_worker, daemon=True).start()
 
         def _unlock_sudo(self, silent_refresh: bool = False) -> bool:
             password, ok = QInputDialog.getText(
@@ -7997,7 +7435,6 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not success:
                 QMessageBox.warning(self, self._tr("dlg_auth_failed"), msg)
                 return False
-            self._install_polkit_rule_best_effort()
             self._on_root_unlocked()
             return True
 
@@ -8020,10 +7457,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 if not silent:
                     QMessageBox.warning(self, self._tr("dlg_polkit_failed"), msg)
             else:
-                self._install_polkit_rule_best_effort()
                 self._on_root_unlocked()
 
         def _on_helper_disconnected(self) -> None:
+            if self.helper.is_connected:
+                return
             self.telemetry.last_proc_data = {}
             self.telemetry.last_precount = {}
             self.telemetry.last_eta_speed_bps = None
@@ -8070,6 +7508,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
         def _poll_tick(self) -> None:
             procs = discover_clamscan_processes()
+            if IS_WINDOWS:
+                self._windows_paused_pids.intersection_update(p["pid"] for p in procs)
+                for proc in procs:
+                    if proc["pid"] in self._windows_paused_pids:
+                        proc["state"] = "T"
             self._known_procs = procs
             was_running = self._current_proc is not None
 
@@ -8808,6 +8251,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
         def _reset_after_scan_exit(self, pid: int) -> None:
             cancel_background_precount()
+            self._windows_paused_pids.discard(pid)
             self._last_active_scan = None
             self._pending_scan_labels.pop(pid, None)
             self._clear_scan_telemetry()
@@ -8825,7 +8269,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 else:
                     if not self._require_root_helper():
                         return
-                    self.helper.call("signal_proc", {"pid": proc["pid"], "sig": sig})
+                    result = self.helper.call("signal_proc", {"pid": proc["pid"], "sig": sig})
+                    if IS_WINDOWS:
+                        if result["paused"]:
+                            self._windows_paused_pids.add(proc["pid"])
+                        else:
+                            self._windows_paused_pids.discard(proc["pid"])
                 self._poll_tick()
             except ProcessLookupError:
                 self._reset_after_scan_exit(proc["pid"])
@@ -9287,6 +8736,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             )
 
         def _start_new_scan(self) -> None:
+            if not self._require_root_helper():
+                return
             args, log_path = self._build_scan_command()
             target = self.scan_target_combo.currentText().strip() or _system_root_target()
             self._launch_scan_args(
@@ -9405,6 +8856,7 @@ def launch_gui(lang: str | None = None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="ClamAV Security Center")
     parser.add_argument("--helper", action="store_true", help="Run internal root JSON helper")
+    parser.add_argument("--elevated-helper", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test", action="store_true", help="Run automated diagnostics")
     parser.add_argument(
         "--lang",
@@ -9414,7 +8866,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.elevated_helper:
+        if not _is_posix_root() or IS_MACOS or not any(k in os.environ for k in ("PKEXEC_UID", "SUDO_UID")):
+            parser.error("Start the elevated helper through sudo or Polkit")
+        _elevated_owner()
+        return run_helper()
     if args.helper:
+        if not IS_WINDOWS and not IS_MACOS and _is_posix_root() and any(
+            k in os.environ for k in ("PKEXEC_UID", "SUDO_UID")
+        ):
+            parser.error("This elevation command is obsolete. Unlock through ClamAV Security Center.")
         return run_helper()
     if args.self_test:
         return run_self_test()

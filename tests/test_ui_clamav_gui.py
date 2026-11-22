@@ -297,7 +297,7 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
         mock_warn.assert_called_once()
         self.assertFalse(self.win.auth_banner.isHidden())
 
-        # Successful password unlock installs polkit rule and hides auth banner
+        # Successful password unlock connects the helper for this session.
         def fake_call(action: str, _params: dict | None = None, **_kw: object) -> dict:
             if action == "list_quarantine":
                 return {"items": []}
@@ -320,7 +320,7 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
             self.assertFalse(self.win.root_badge_lbl.isHidden())
 
         called_actions = [c[0][0] for c in mock_call.call_args_list]
-        self.assertIn("install_polkit_rule", called_actions)
+        self.assertNotIn("install_polkit_rule", called_actions)
         self.assertIn("list_quarantine", called_actions)
         self.assertIn("get_schedule", called_actions)
 
@@ -330,6 +330,20 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
         self.assertFalse(self.win.auth_banner.isHidden())
         self.assertTrue(self.win.root_badge_lbl.isHidden())
         self.assertEqual(self.win.telemetry.last_proc_data, {})
+
+    def test_linux_startup_does_not_request_elevation(self) -> None:
+        app_mod.save_json_file(app_mod.SETTINGS_FILE_PATH, {"polkit_rule_installed": True})
+        try:
+            with (
+                mock.patch.object(app_mod, "IS_WINDOWS", False),
+                mock.patch.object(app_mod, "IS_MACOS", False),
+                mock.patch.object(app_mod, "_euid", return_value=1000),
+                mock.patch("threading.Thread") as launch,
+            ):
+                self.win._try_auto_connect()
+            launch.assert_not_called()
+        finally:
+            app_mod.SETTINGS_FILE_PATH.unlink(missing_ok=True)
 
     @unittest.skipIf(sys.platform != "linux", "POSIX polkit/sudo unlock prompt test")
     def test_pkexec_unlock_and_require_root_helper_prompt(self) -> None:
@@ -830,6 +844,39 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             self.assertIn("-r", restarted_args)
             self.assertNotIn("-i", restarted_args)
             self.assertNotIn("-ri", restarted_args)
+
+    def test_windows_pause_confirmation_survives_process_polling(self) -> None:
+        process = {
+            "pid": 6789,
+            "cmdline": ["clamscan.exe"],
+            "state": "R",
+            "elapsed_sec": 2.0,
+            "nice": 0,
+            "rss_kb": 1024,
+            "cpu_ticks": 20,
+            "user": "user",
+            "uid": app_mod._uid(),
+            "log_path": "",
+            "quiet_infected_only": False,
+        }
+        with (
+            mock.patch.object(app_mod, "IS_WINDOWS", True),
+            mock.patch.object(app_mod, "discover_clamscan_processes", side_effect=lambda: [dict(process)]),
+            mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
+            mock.patch.object(self.win.helper, "call", side_effect=[{"paused": True}, {"paused": False}]) as call,
+            mock.patch("threading.Thread"),
+        ):
+            self.win._poll_tick()
+            self.win._toggle_pause_scan()
+            self.win._poll_tick()
+            self.assertEqual(self.win.pause_btn.text(), "Resume Scan")
+            self.win._toggle_pause_scan()
+            self.win._poll_tick()
+            self.assertEqual(self.win._current_proc["state"], "R")
+            self.assertEqual(call.call_args_list, [
+                mock.call("signal_proc", {"pid": 6789, "sig": "SIGSTOP"}),
+                mock.call("signal_proc", {"pid": 6789, "sig": "SIGCONT"}),
+            ])
 
     def test_handle_scan_finished_records_history_and_notifies(self) -> None:
         self.win.telemetry.total_lines_logged = 123
@@ -1402,6 +1449,22 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(mock_call.call_args_list[0][0][0], "start_scan")
         self.assertEqual(mock_call.call_args_list[0][0][1]["log_path"], "/tmp/myscan.log")
 
+    def test_delegated_linux_custom_scan_uses_report_only(self) -> None:
+        action = self.win.infected_action_combo
+        action.setCurrentIndex(action.findData("move"))
+        with (
+            mock.patch.object(app_mod, "IS_WINDOWS", False),
+            mock.patch.object(app_mod, "IS_MACOS", False),
+            mock.patch.object(app_mod, "_euid", return_value=1000),
+            mock.patch.object(type(self.win.helper), "is_root", new_callable=mock.PropertyMock, return_value=True),
+        ):
+            self.win._update_controls_enabled()
+            self.assertEqual(action.currentData(), "report")
+            self.assertFalse(action.isEnabled())
+            self.assertNotIn("--move=", self.win.cmd_preview_edit.text())
+        self.win._update_controls_enabled()
+        self.assertTrue(action.isEnabled())
+
     def test_freshclam_tab_execution_and_completion_states(self) -> None:
         self.win._open_tab(3)
         with (
@@ -1854,6 +1917,7 @@ class TestUILiveClamAV(unittest.TestCase, _UIEnvMixin):
             mock.patch.object(app_mod, "_default_db_dir", return_value=str(database)),
             mock.patch.object(app_mod, "get_quick_scan_targets", return_value=[str(targets)]),
             mock.patch.object(app_mod, "DEFAULT_LOG_PATH", str(log_path)),
+            mock.patch.object(app_mod, "DEFAULT_QUARANTINE_DIR", str(root / "quarantine")),
             mock.patch.object(self.win, "_notify"),
             mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
             mock.patch.object(QMessageBox, "information"),
