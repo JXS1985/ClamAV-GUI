@@ -132,8 +132,9 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
         self.assertTrue(hasattr(self.win, "stats_strip"))
         self.assertTrue(hasattr(self.win, "header_shield_lbl"))
         self.assertTrue(hasattr(self.win, "hero_icon_lbl"))
-        self.assertTrue(hasattr(self.win, "lang_de_btn"))
-        self.assertTrue(hasattr(self.win, "lang_en_btn"))
+        self.assertFalse(hasattr(self.win, "lang_de_btn"))
+        self.assertFalse(hasattr(self.win, "lang_en_btn"))
+        self.assertFalse(hasattr(self.win, "lang_combo"))
 
         initial_w = self.win.width()
         initial_h = self.win.height()
@@ -214,33 +215,20 @@ class TestUILocalizationAndPersistence(unittest.TestCase):
                         self.assertEqual(win.sched_freq_combo.itemText(1), "Wöchentlich")
                         self.assertEqual(win.freshclam_btn.text(), "Virensignaturen jetzt aktualisieren (freshclam)")
 
-                        # Live switch to English
-                        idx_en = win.lang_combo.findData("en")
-                        win.lang_combo.setCurrentIndex(idx_en)
-                        win._qt_app.processEvents()
-
-                        self.assertEqual(win.lang, "en")
-                        self.assertEqual(win.app_title_lbl.text(), "ClamAV Security Center")
-                        self.assertEqual(win.hero_title_lbl.text(), "Your computer is protected")
-                        self.assertEqual(win.tabs.tabText(0), "Live Output & Log")
-                        self.assertEqual(win.threats_table.horizontalHeaderItem(0).text(), "File Path")
-                        self.assertEqual(win.quarantine_table.horizontalHeaderItem(0).text(), "File Name")
-                        self.assertEqual(win.history_table.horizontalHeaderItem(0).text(), "Date Completed")
-                        self.assertEqual(win.freshclam_btn.text(), "Update Virus Signatures Now (freshclam)")
-
-                        saved = json.loads(app_mod.SETTINGS_FILE_PATH.read_text(encoding="utf-8"))
-                        self.assertEqual(saved["language"], "en")
                     finally:
                         win._force_quit = True
                         win.close()
                         win._qt_app.processEvents()
 
-                    # New window without explicit lang reads saved "language": "en" even under de_DE
-                    with mock.patch.dict(os.environ, {"LANG": "de_DE.UTF-8"}):
+                    # New window without explicit lang uses OS locale (ignoring stale settings.json)
+                    app_mod.SETTINGS_FILE_PATH.write_text('{"language": "en"}', encoding="utf-8")
+                    with mock.patch.dict(
+                        os.environ, {"LANG": "de_DE.UTF-8", "LC_ALL": "", "LC_MESSAGES": "", "LANGUAGE": ""}
+                    ):
                         win2 = app_mod.create_main_window(auto_poll=False, lang=None)
                         try:
-                            self.assertEqual(win2.lang, "en")
-                            self.assertEqual(win2.app_title_lbl.text(), "ClamAV Security Center")
+                            self.assertEqual(win2.lang, "de")
+                            self.assertEqual(win2.app_title_lbl.text(), "ClamAV Sicherheitszentrum")
                         finally:
                             win2._force_quit = True
                             win2.close()
@@ -564,7 +552,22 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             mock_kill.assert_called_once_with(6161, signal.SIGSTOP)
         self.assertEqual(self.win.pause_btn.text(), "Resume Scan")
 
-        # Stop scan confirmation Yes -> SIGTERM
+        # Stop paused scan confirmation Yes -> SIGTERM + SIGCONT
+        with (
+            mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            mock.patch("os.kill") as mock_kill_paused,
+            mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+            mock.patch.object(self.win, "_notify"),
+        ):
+            QTest.mouseClick(self.win.stop_btn, Qt.MouseButton.LeftButton)
+            self.assertEqual(
+                [c[0] for c in mock_kill_paused.call_args_list],
+                [(6161, signal.SIGTERM), (6161, signal.SIGCONT)],
+            )
+
+        # Stop running (unpaused) scan confirmation Yes -> SIGTERM only
+        self.win._current_proc = dict(own_proc)
+        self.win._update_controls_enabled()
         with (
             mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
             mock.patch("os.kill") as mock_kill,
@@ -1054,61 +1057,151 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
         self.assertTrue(self.win.hero_db_btn.isHidden())
 
-    def test_mockup_lang_pills_tiles_inspect_error_and_german_history(self) -> None:
-        # Segmented DE / EN pill click switches language cleanly
-        with mock.patch.object(
-            app_mod,
-            "get_clamav_metadata",
-            return_value={"version": "ClamAV 1.4.6-test", "freshclam_service": "active"},
+    def test_os_locales_tiles_inspect_error_and_overflow_audit(self) -> None:
+        # Verify German auto-detection via OS locale (no UI picker) + localized error messages
+        with (
+            mock.patch.dict(
+                os.environ, {"LC_ALL": "de_DE.UTF-8", "LC_MESSAGES": "", "LANG": "", "LANGUAGE": ""}
+            ),
+            mock.patch.object(
+                app_mod,
+                "get_clamav_metadata",
+                return_value={
+                    "version": "Unavailable",
+                    "freshclam_service": "inactive",
+                    "has_clamscan": False,
+                    "has_freshclam": False,
+                    "has_virus_db": False,
+                    "db_files_count": 0,
+                    "db_dir": "/var/lib/clamav",
+                    "missing_required": ["clamscan", "freshclam"],
+                    "missing_optional": [],
+                },
+            ),
         ):
-            QTest.mouseClick(self.win.lang_de_btn, Qt.MouseButton.LeftButton)
-            self.win._qt_app.processEvents()
-        self.assertEqual(self.win.lang, "de")
-        self.assertIn("Downloads & Home", self.win.btn_quick_scan.sub_lbl.text())
-        self.assertIn("Aktiv", self.win.meta_lbl.text())
+            win_de = app_mod.create_main_window(auto_poll=False, lang=None)
+            win_de.show()
+            win_de._qt_app.processEvents()
+            try:
+                self.assertEqual(win_de.lang, "de")
+                self.assertIn("Downloads & Home", win_de.btn_quick_scan.sub_lbl.text())
+                self.assertIn("außerdem fehlt", win_de.hero_sub_lbl.text())
+                self.assertIn("Inaktiv", win_de.meta_lbl.text())
 
-        # Missing clamscan + pkexec in German uses localized 'außerdem fehlt' (no English leak)
-        with mock.patch.object(
-            app_mod,
-            "get_clamav_metadata",
-            return_value={
-                "version": "Unavailable",
-                "freshclam_service": "inactive",
-                "has_clamscan": False,
-                "has_freshclam": False,
-                "has_virus_db": False,
-                "db_files_count": 0,
-                "db_dir": "/var/lib/clamav",
-                "missing_required": ["clamscan", "freshclam"],
-                "missing_optional": [],
-            },
-        ):
-            self.win._refresh_metadata()
-        self.assertIn("außerdem fehlt", self.win.hero_sub_lbl.text())
-        self.assertIn("Inaktiv", self.win.meta_lbl.text())
+                Path(app_mod.DEFAULT_LOG_PATH).write_text(
+                    "----------- SCAN SUMMARY -----------\n"
+                    "Scanned files: 10\n"
+                    "Infected files: 0\n"
+                    "Start Date: 2026:11:21 15:00:00\n",
+                    encoding="utf-8",
+                )
+                try:
+                    win_de._refresh_history()
+                    self.assertEqual(win_de.history_table.item(0, 1).text(), "System- / Protokollscan")
+                finally:
+                    Path(app_mod.DEFAULT_LOG_PATH).unlink(missing_ok=True)
 
-        # Parsed log summary target localizes to German in History tab
-        Path(app_mod.DEFAULT_LOG_PATH).write_text(
-            "----------- SCAN SUMMARY -----------\n"
-            "Scanned files: 10\n"
-            "Infected files: 0\n"
-            "Start Date: 2026:11:21 15:00:00\n",
-            encoding="utf-8",
+                win_de._on_inspect_done(None, "Root helper restricts scan logs to /var/log/")
+                self.assertIn("Protokoll-Hinweis", win_de.log_hint_lbl.text())
+            finally:
+                win_de._force_quit = True
+                win_de.close()
+                win_de._qt_app.processEvents()
+
+        # Text overflow & layout geometry audit across all 8 supported OS locales
+        locale_map = (
+            ("en_US.UTF-8", "en"),
+            ("de_DE.UTF-8", "de"),
+            ("es_ES.UTF-8", "es"),
+            ("fr_FR.UTF-8", "fr"),
+            ("pt_BR.UTF-8", "pt"),
+            ("zh_CN.UTF-8", "zh"),
+            ("ja_JP.UTF-8", "ja"),
+            ("ru_RU.UTF-8", "ru"),
         )
-        try:
-            self.win._refresh_history()
-            self.assertEqual(self.win.history_table.item(0, 1).text(), "System- / Protokollscan")
-        finally:
-            Path(app_mod.DEFAULT_LOG_PATH).unlink(missing_ok=True)
+        ok_meta = {"version": "ClamAV 1.4.6", "freshclam_service": "active"}
+        for loc_env, expected_code in locale_map:
+            with (
+                mock.patch.dict(
+                    os.environ, {"LC_ALL": loc_env, "LC_MESSAGES": "", "LANG": "", "LANGUAGE": ""}
+                ),
+                mock.patch.object(app_mod, "get_clamav_metadata", return_value=ok_meta),
+            ):
+                w = app_mod.create_main_window(auto_poll=False, lang=None)
+                w.show()
+                w._qt_app.processEvents()
+                try:
+                    self.assertEqual(w.lang, expected_code)
+                    self.assertLessEqual(w.width(), 1200, msg=f"Window widened for {expected_code}: {w.width()}")
 
-        # Inspect error surfaces visibly in log_hint_lbl instead of failing silently
-        self.win._on_inspect_done(None, "Root helper restricts scan logs to /var/log/")
-        self.assertIn("Protokoll-Hinweis", self.win.log_hint_lbl.text())
+                    # Check action tiles fit their label bounds cleanly
+                    for tile in (w.btn_quick_scan, w.btn_full_scan, w.btn_pick_scan):
+                        self.assertGreaterEqual(tile.width(), 240, msg=f"Narrow tile in {expected_code}")
+                        for lbl in (tile.title_lbl, tile.sub_lbl):
+                            self.assertTrue(lbl.wordWrap())
+                            self.assertGreaterEqual(
+                                lbl.width(), 120, msg=f"Tile label clipped in {expected_code}"
+                            )
+                            self.assertGreaterEqual(
+                                lbl.height(),
+                                lbl.fontMetrics().height(),
+                                msg=f"Zero height tile label in {expected_code}",
+                            )
 
-        # Switch back via EN pill cleanly
-        QTest.mouseClick(self.win.lang_en_btn, Qt.MouseButton.LeftButton)
-        self.win._qt_app.processEvents()
-        self.assertEqual(self.win.lang, "en")
+                    # Check 4-column status strip fits without horizontal or vertical clipping
+                    for card in (w.card_status, w.card_cpu, w.card_io, w.card_threats):
+                        self.assertTrue(card.title_lbl.wordWrap())
+                        self.assertTrue(card.value_lbl.wordWrap())
+                        self.assertGreaterEqual(
+                            card.width(), 180, msg=f"Narrow stat card in {expected_code}"
+                        )
+                        if card.value_lbl.hasHeightForWidth():
+                            needed_h = card.value_lbl.heightForWidth(card.value_lbl.width())
+                            self.assertGreaterEqual(
+                                card.value_lbl.height(),
+                                needed_h,
+                                msg=f"StatCard vertical clip in {expected_code}: {card.value_lbl.text()!r}",
+                            )
+
+                    # Non-wrapped action buttons must fit text width inside widget rect
+                    for btn in (w.sudo_btn, w.pkexec_btn, w.toggle_tabs_btn):
+                        txt = btn.text().replace("&&", "&")
+                        txt_w = btn.fontMetrics().horizontalAdvance(txt)
+                        self.assertLessEqual(
+                            txt_w,
+                            btn.width(),
+                            msg=f"Button overflow in {expected_code}: {txt!r} ({txt_w} > {btn.width()})",
+                        )
+
+                    # Active control bar also renders cleanly without horizontal overflow
+                    w._current_proc = {
+                        "pid": 7777,
+                        "cmdline": ["clamscan", "-r", "/home"],
+                        "state": "R",
+                        "elapsed_sec": 8.0,
+                        "quiet_infected_only": False,
+                        "nice": 0,
+                        "rss_kb": 1024,
+                        "cpu_ticks": 10,
+                        "user": "user",
+                        "uid": os.getuid(),
+                        "log_path": "",
+                    }
+                    w._update_controls_enabled()
+                    w._qt_app.processEvents()
+                    self.assertFalse(w.ctrl_box.isHidden())
+                    for act_btn in (w.pause_btn, w.stop_btn):
+                        t = act_btn.text().replace("&&", "&")
+                        tw = act_btn.fontMetrics().horizontalAdvance(t)
+                        self.assertLessEqual(
+                            tw,
+                            act_btn.width(),
+                            msg=f"Active button overflow in {expected_code}: {t!r}",
+                        )
+                finally:
+                    w._force_quit = True
+                    w.close()
+                    w._qt_app.processEvents()
 
 
 if __name__ == "__main__":

@@ -262,8 +262,10 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
         with tempfile.TemporaryDirectory() as fake_proc:
             p1 = Path(fake_proc) / "111"
             p2 = Path(fake_proc) / "222"
+            p3 = Path(fake_proc) / "333"
             (p1).mkdir()
             (p2).mkdir()
+            (p3).mkdir()
             (p1 / "comm").write_text("python3\n", encoding="utf-8")
             (p2 / "comm").write_text("clamscan\n", encoding="utf-8")
             (p2 / "stat").write_text(_make_stat_line(222, "clamscan", "T", nice=19), encoding="utf-8")
@@ -275,18 +277,23 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
                 encoding="utf-8",
             )
             (p2 / "cmdline").write_bytes(b"/usr/bin/clamscan\x00-r\x00-i\x00--log=/tmp/t.log\x00/\x00")
+            # Zombie clamscan must be filtered out and never reported as an active scan
+            (p3 / "comm").write_text("clamscan\n", encoding="utf-8")
+            (p3 / "stat").write_text(_make_stat_line(333, "clamscan", "Z", nice=0), encoding="utf-8")
 
             orig_listdir = os.listdir
             orig_open = open
 
             def fake_listdir(path: str = ".") -> list[str]:
                 if path == "/proc":
-                    return ["111", "222", "self"]
+                    return ["111", "222", "333", "self"]
                 return orig_listdir(path)
 
             def fake_open(file: object, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
                 if isinstance(file, str) and file.startswith("/proc/222/"):
                     return orig_open(os.path.join(fake_proc, "222", file[len("/proc/222/"):]), *args, **kwargs)
+                if isinstance(file, str) and file.startswith("/proc/333/"):
+                    return orig_open(os.path.join(fake_proc, "333", file[len("/proc/333/"):]), *args, **kwargs)
                 if isinstance(file, str) and file.startswith("/proc/111/"):
                     return orig_open(os.path.join(fake_proc, "111", file[len("/proc/111/"):]), *args, **kwargs)
                 return orig_open(file, *args, **kwargs)  # type: ignore[arg-type]
@@ -486,6 +493,26 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
             res = app_mod._helper_signal_proc({"pid": 4321, "sig": "SIGSTOP"})
             self.assertEqual(res, {"pid": 4321, "sig": "SIGSTOP"})
             mock_kill.assert_called_once_with(4321, signal.SIGSTOP)
+
+        # Stopping a paused (SIGSTOP -> state 'T') scan sends SIGTERM + SIGCONT and escalates to SIGKILL if alive
+        with (
+            mock.patch.object(app_mod, "_validate_clamscan_pid"),
+            mock.patch.object(
+                app_mod,
+                "parse_proc_stat",
+                side_effect=[{"state": "T"}, {"state": "R"}, {"state": "R"}],
+            ),
+            mock.patch("os.path.exists", return_value=True),
+            mock.patch("time.monotonic", side_effect=[0.0, 0.1, 0.7]),
+            mock.patch("time.sleep"),
+            mock.patch("os.kill") as mock_kill2,
+        ):
+            res2 = app_mod._helper_signal_proc({"pid": 4321, "sig": "SIGTERM"})
+            self.assertEqual(res2, {"pid": 4321, "sig": "SIGTERM"})
+            self.assertEqual(
+                [c[0] for c in mock_kill2.call_args_list],
+                [(4321, signal.SIGTERM), (4321, signal.SIGCONT), (4321, signal.SIGKILL)],
+            )
 
         with (
             mock.patch.object(app_mod, "_validate_clamscan_pid"),
@@ -739,34 +766,51 @@ class TestLocalizationAndCLI(unittest.TestCase):
     """Tests for German/English translation completeness, locale detection, and CLI entry points."""
 
     def test_translation_keys_placeholders_and_fallbacks(self) -> None:
+        expected_langs = {"en", "de", "es", "fr", "pt", "zh", "ja", "ru"}
+        self.assertEqual(set(app_mod.TRANSLATIONS.keys()), expected_langs)
         en_dict = app_mod.TRANSLATIONS["en"]
-        de_dict = app_mod.TRANSLATIONS["de"]
-        self.assertEqual(set(en_dict.keys()), set(de_dict.keys()))
-
         formatter = string.Formatter()
-        for key in en_dict:
-            self.assertTrue(en_dict[key].strip(), msg=f"Empty en value for '{key}'")
-            self.assertTrue(de_dict[key].strip(), msg=f"Empty de value for '{key}'")
-            en_fields = {fname for _, fname, _, _ in formatter.parse(en_dict[key]) if fname is not None}
-            de_fields = {fname for _, fname, _, _ in formatter.parse(de_dict[key]) if fname is not None}
-            self.assertEqual(en_fields, de_fields, msg=f"Placeholder mismatch for translation key '{key}'")
+
+        for lang_code, lang_dict in app_mod.TRANSLATIONS.items():
+            self.assertEqual(set(en_dict.keys()), set(lang_dict.keys()), msg=f"Key mismatch in '{lang_code}'")
+            for key in en_dict:
+                self.assertTrue(lang_dict[key].strip(), msg=f"Empty {lang_code} value for '{key}'")
+                en_fields = {fname for _, fname, _, _ in formatter.parse(en_dict[key]) if fname is not None}
+                lang_fields = {fname for _, fname, _, _ in formatter.parse(lang_dict[key]) if fname is not None}
+                self.assertEqual(
+                    en_fields, lang_fields, msg=f"Placeholder mismatch for '{lang_code}.{key}'"
+                )
 
         # Fallback to English for unknown language and key name for missing key
-        self.assertEqual(app_mod.tr("fr", "app_title"), en_dict["app_title"])
+        self.assertEqual(app_mod.tr("ko", "app_title"), en_dict["app_title"])
         self.assertEqual(app_mod.tr("de", "nonexistent_key_xyz"), "nonexistent_key_xyz")
 
     def test_detect_default_language(self) -> None:
-        self.assertEqual(app_mod.detect_default_language({"language": "en"}), "en")
-        self.assertEqual(app_mod.detect_default_language({"language": "de"}), "de")
+        # Saved settings no longer override OS locale now that language picker is removed
+        with mock.patch.dict(os.environ, {"LANG": "es_ES.UTF-8", "LC_ALL": "", "LC_MESSAGES": "", "LANGUAGE": ""}):
+            self.assertEqual(app_mod.detect_default_language({"language": "de"}), "es")
 
-        with mock.patch.dict(os.environ, {"LANG": "de_DE.UTF-8", "LC_ALL": "", "LC_MESSAGES": ""}):
-            self.assertEqual(app_mod.detect_default_language({}), "de")
+        locale_cases = (
+            ("en_US.UTF-8", "en"),
+            ("de_AT.UTF-8", "de"),
+            ("es_MX.UTF-8", "es"),
+            ("fr_FR.UTF-8", "fr"),
+            ("pt_BR.UTF-8", "pt"),
+            ("zh_CN.UTF-8", "zh"),
+            ("ja_JP.UTF-8", "ja"),
+            ("ru_RU.UTF-8", "ru"),
+            ("C", "en"),
+        )
+        for loc_str, expected in locale_cases:
+            with mock.patch.dict(
+                os.environ, {"LANG": loc_str, "LC_ALL": "", "LC_MESSAGES": "", "LANGUAGE": ""}
+            ):
+                self.assertEqual(app_mod.detect_default_language({}), expected)
 
-        with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8", "LC_ALL": "", "LC_MESSAGES": ""}):
-            self.assertEqual(app_mod.detect_default_language({}), "en")
-
-        with mock.patch.dict(os.environ, {"LANG": "C", "LC_ALL": "de_AT.UTF-8", "LC_MESSAGES": ""}):
-            self.assertEqual(app_mod.detect_default_language({}), "de")
+        with mock.patch.dict(
+            os.environ, {"LANG": "C", "LC_ALL": "", "LC_MESSAGES": "", "LANGUAGE": "xx_YY:ja_JP:en_US"}
+        ):
+            self.assertEqual(app_mod.detect_default_language({}), "ja")
 
     def test_main_cli_dispatch(self) -> None:
         with mock.patch.object(sys, "argv", ["clamav_gui.py", "--self-test"]), mock.patch.object(
