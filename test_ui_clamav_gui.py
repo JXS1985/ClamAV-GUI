@@ -352,6 +352,147 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
         ):
             self.assertFalse(self.win._require_root_helper())
 
+    @unittest.skipIf(os.name == "nt", "Linux User Mode fallback flow test")
+    def test_user_mode_activation_scans_quarantine_and_user_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as um_tmp:
+            root = Path(um_tmp)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            orig_log = app_mod.DEFAULT_LOG_PATH
+            orig_quar = app_mod.DEFAULT_QUARANTINE_DIR
+            orig_usvc = app_mod.USER_SYSTEMD_SERVICE_PATH
+            orig_utmr = app_mod.USER_SYSTEMD_TIMER_PATH
+            orig_log_edit = self.win.log_path_edit.text()
+            orig_new_log_edit = self.win.new_log_edit.text()
+            orig_tel_log = self.win.telemetry.log_path
+
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                app_mod.DEFAULT_LOG_PATH = "/var/log/clamav-scan.log"
+                app_mod.DEFAULT_QUARANTINE_DIR = "/root/quarantine"
+                app_mod.USER_SYSTEMD_SERVICE_PATH = str(root / "systemd-user" / "clamav-gui-scan.service")
+                app_mod.USER_SYSTEMD_TIMER_PATH = str(root / "systemd-user" / "clamav-gui-scan.timer")
+                self.win.log_path_edit.setText("/var/log/clamav-scan.log")
+                self.win.new_log_edit.setText("/var/log/clamav-scan.log")
+                self.win.telemetry.log_path = "/var/log/clamav-scan.log"
+
+                user_db = app_mod.APP_DATA_DIR / "database"
+                user_db.mkdir(parents=True)
+                (user_db / "main.cvd").write_bytes(b"CVD")
+
+                fake_proc = mock.Mock()
+                fake_proc.poll.return_value = None
+                fake_proc.stdin = mock.Mock()
+
+                def fake_start_local() -> tuple[bool, str]:
+                    self.win.helper._proc = fake_proc
+                    self.win.helper.uid = 1000
+                    return True, "Local helper active."
+
+                calls: list[tuple[str, dict]] = []
+
+                def fake_call(action: str, params: dict | None = None, **_kw: object) -> dict:
+                    calls.append((action, dict(params or {})))
+                    if action == "start_scan":
+                        return {"pid": 7171, "log_path": (params or {}).get("log_path", "")}
+                    if action == "list_quarantine":
+                        return {"items": []}
+                    if action == "get_schedule":
+                        return {"enabled": False, "scan_type": "quick", "frequency": "weekly", "day_of_week": "Sun", "time_of_day": "03:00", "next_run": "-"}
+                    if action == "set_schedule":
+                        return {"enabled": True, "next_run": "tomorrow"}
+                    if action == "quarantine_file":
+                        return {"dest": str(app_mod.APP_DATA_DIR / "quarantine" / "bad.bin")}
+                    if action == "run_freshclam":
+                        return {"success": True, "returncode": 0, "output": "ok"}
+                    return {"proc": {"alive": False}, "log": {"exists": False}}
+
+                self.win._update_auth_banner()
+                self.assertFalse(self.win.auth_banner.isHidden())
+                self.assertFalse(self.win.user_mode_btn.isHidden())
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(self.win.helper, "start_local", side_effect=fake_start_local),
+                    mock.patch.object(self.win.helper, "call", side_effect=fake_call),
+                    mock.patch.object(app_mod, "discover_clamscan_processes", return_value=[]),
+                    mock.patch.object(app_mod, "_default_db_dir", return_value=str(user_db)),
+                    mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+                    mock.patch.object(QMessageBox, "information"),
+                ):
+                    QTest.mouseClick(self.win.user_mode_btn, Qt.MouseButton.LeftButton)
+                    self.win._qt_app.processEvents()
+
+                    self.assertTrue(self.win.helper.is_connected)
+                    self.assertTrue(self.win.helper.is_user_mode)
+                    self.assertFalse(self.win.helper.is_root)
+                    self.assertTrue(self.win.auth_banner.isHidden())
+                    self.assertFalse(self.win.root_badge_lbl.isHidden())
+                    self.assertIn("User Mode", self.win.root_badge_lbl.text())
+
+                    expected_log = str(app_mod.APP_DATA_DIR / "clamav-scan.log")
+                    expected_qdir = str(app_mod.APP_DATA_DIR / "quarantine")
+                    self.assertEqual(self.win.log_path_edit.text(), expected_log)
+                    self.assertEqual(self.win.new_log_edit.text(), expected_log)
+
+                    # Quick scan uses user log & --database=user_db
+                    QTest.mouseClick(self.win.btn_quick_scan, Qt.MouseButton.LeftButton)
+                    start_call = next(c for c in calls if c[0] == "start_scan")
+                    self.assertEqual(start_call[1]["log_path"], expected_log)
+                    self.assertIn(f"--database={user_db}", start_call[1]["cmd_args"])
+
+                    # Quarantine uses APP_DATA_DIR/quarantine
+                    with mock.patch.object(self.win, "_notify"):
+                        self.win._apply_log_result(
+                            {"exists": True, "reset": False, "new_offset": 40, "new_text": "/tmp/user_bad.bin: Test.Trojan FOUND\n"}
+                        )
+                    self.win.threats_table.selectRow(0)
+                    self.win._quarantine_selected_threat()
+                    q_call = next(c for c in calls if c[0] == "quarantine_file")
+                    self.assertEqual(q_call[1]["quarantine_dir"], expected_qdir)
+
+                    # Save schedule & run freshclam pass user_mode=True
+                    self.win._open_tab(2)
+                    QTest.mouseClick(self.win.sched_save_btn, Qt.MouseButton.LeftButton)
+                    s_call = next(c for c in calls if c[0] == "set_schedule")
+                    self.assertTrue(s_call[1].get("user_mode"))
+
+                    self.win._run_freshclam()
+                    deadline = time.monotonic() + 2.0
+                    while not any(c[0] == "run_freshclam" for c in calls) and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                        self.win._qt_app.processEvents()
+                    f_call = next(c for c in calls if c[0] == "run_freshclam")
+                    self.assertEqual(f_call[1], {"user_mode": True})
+
+                # Also verify _require_root_helper dialog's "Continue in User Mode" button path
+                self.win.helper._proc = None
+                self.win.helper.uid = None
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(self.win, "_activate_user_mode", return_value=True) as mock_act,
+                    mock.patch.object(QMessageBox, "exec", return_value=0),
+                    mock.patch.object(
+                        QMessageBox,
+                        "addButton",
+                        side_effect=["btn_sudo", "btn_polkit", "btn_user", "btn_cancel"],
+                    ),
+                    mock.patch.object(QMessageBox, "clickedButton", return_value="btn_user"),
+                ):
+                    self.assertTrue(self.win._require_root_helper())
+                    mock_act.assert_called_once()
+            finally:
+                self.win.helper._proc = None
+                self.win.helper.uid = None
+                app_mod.APP_DATA_DIR = orig_app_dir
+                app_mod.DEFAULT_LOG_PATH = orig_log
+                app_mod.DEFAULT_QUARANTINE_DIR = orig_quar
+                app_mod.USER_SYSTEMD_SERVICE_PATH = orig_usvc
+                app_mod.USER_SYSTEMD_TIMER_PATH = orig_utmr
+                self.win.log_path_edit.setText(orig_log_edit)
+                self.win.new_log_edit.setText(orig_new_log_edit)
+                self.win.telemetry.log_path = orig_tel_log
+                self.win._update_auth_banner()
+
 
 class TestUITelemetryProgressAndLiveLog(unittest.TestCase, _UIEnvMixin):
     """UI tests for telemetry rendering, hybrid progress/ETA, partial log streaming, and threat banner."""
@@ -1618,7 +1759,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                             )
 
                     # Non-wrapped action buttons must fit text width inside widget rect
-                    for btn in (w.about_btn, w.sudo_btn, w.pkexec_btn, w.toggle_tabs_btn):
+                    for btn in (w.about_btn, w.sudo_btn, w.pkexec_btn, w.user_mode_btn, w.toggle_tabs_btn):
                         txt = btn.text().replace("&&", "&")
                         txt_w = btn.fontMetrics().horizontalAdvance(txt)
                         self.assertLessEqual(

@@ -103,6 +103,9 @@ QUARANTINE_MANIFEST = "manifest.json"
 POLKIT_RULE_PATH = "/etc/polkit-1/rules.d/49-clamav-kde-gui.rules"
 SYSTEMD_SERVICE_PATH = "/etc/systemd/system/clamav-gui-scan.service"
 SYSTEMD_TIMER_PATH = "/etc/systemd/system/clamav-gui-scan.timer"
+USER_SYSTEMD_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "systemd" / "user"
+USER_SYSTEMD_SERVICE_PATH = str(USER_SYSTEMD_DIR / "clamav-gui-scan.service")
+USER_SYSTEMD_TIMER_PATH = str(USER_SYSTEMD_DIR / "clamav-gui-scan.timer")
 WINDOWS_SCHEDULE_CONFIG_PATH = APP_DATA_DIR / "schedule.json"
 WINDOWS_TASK_NAME = "ClamAVSecurityCenterScan"
 HISTORY_FILE_PATH = APP_DATA_DIR / "history.json"
@@ -126,6 +129,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "ClamAV Security Center",
         "detecting_clamav": "Detecting ClamAV...",
         "root_active_badge": "●  Protected Access Active",
+        "user_mode_badge": "●  User Mode Active",
+        "user_mode_btn": "User Mode",
+        "continue_user_mode_btn": "Continue in User Mode",
         "quit_btn": "Quit",
         "about_btn": "About",
         "dlg_about_title": "About ClamAV Security Center",
@@ -406,6 +412,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "ClamAV Sicherheitszentrum",
         "detecting_clamav": "ClamAV wird erkannt...",
         "root_active_badge": "●  Geschützter Zugriff aktiv",
+        "user_mode_badge": "●  Benutzermodus aktiv",
+        "user_mode_btn": "Benutzermodus",
+        "continue_user_mode_btn": "Im Benutzermodus fortfahren",
         "quit_btn": "Beenden",
         "about_btn": "Über",
         "dlg_about_title": "Über ClamAV Sicherheitszentrum",
@@ -686,6 +695,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "Centro de Seguridad ClamAV",
         "detecting_clamav": "Detectando ClamAV...",
         "root_active_badge": "●  Acceso protegido activo",
+        "user_mode_badge": "●  Modo usuario activo",
+        "user_mode_btn": "Modo usuario",
+        "continue_user_mode_btn": "Continuar en modo usuario",
         "quit_btn": "Salir",
         "about_btn": "Acerca de",
         "dlg_about_title": "Acerca de Centro de Seguridad ClamAV",
@@ -966,6 +978,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "Centre de sécurité ClamAV",
         "detecting_clamav": "Détection de ClamAV...",
         "root_active_badge": "●  Accès protégé actif",
+        "user_mode_badge": "●  Mode utilisateur actif",
+        "user_mode_btn": "Mode utilisateur",
+        "continue_user_mode_btn": "Continuer en mode utilisateur",
         "quit_btn": "Quitter",
         "about_btn": "À propos",
         "dlg_about_title": "À propos du Centre de sécurité ClamAV",
@@ -1246,6 +1261,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "Central de Segurança ClamAV",
         "detecting_clamav": "Detectando ClamAV...",
         "root_active_badge": "●  Acesso protegido ativo",
+        "user_mode_badge": "●  Modo usuário ativo",
+        "user_mode_btn": "Modo usuário",
+        "continue_user_mode_btn": "Continuar no modo usuário",
         "quit_btn": "Sair",
         "about_btn": "Sobre",
         "dlg_about_title": "Sobre a Central de Segurança ClamAV",
@@ -1526,6 +1544,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "ClamAV 安全中心",
         "detecting_clamav": "正在检测 ClamAV...",
         "root_active_badge": "●  受保护访问已启用",
+        "user_mode_badge": "●  用户模式已启用",
+        "user_mode_btn": "用户模式",
+        "continue_user_mode_btn": "以用户模式继续",
         "quit_btn": "退出",
         "about_btn": "关于",
         "dlg_about_title": "关于 ClamAV 安全中心",
@@ -1806,6 +1827,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "ClamAV セキュリティセンター",
         "detecting_clamav": "ClamAV を検出中...",
         "root_active_badge": "●  保護アクセス有効",
+        "user_mode_badge": "●  ユーザーモード有効",
+        "user_mode_btn": "ユーザーモード",
+        "continue_user_mode_btn": "ユーザーモードで続行",
         "quit_btn": "終了",
         "about_btn": "概要",
         "dlg_about_title": "ClamAV セキュリティセンターについて",
@@ -2086,6 +2110,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "app_title": "Центр безопасности ClamAV",
         "detecting_clamav": "Поиск ClamAV...",
         "root_active_badge": "●  Защищённый доступ активен",
+        "user_mode_badge": "●  Режим пользователя",
+        "user_mode_btn": "Без root",
+        "continue_user_mode_btn": "Продолжить без root",
         "quit_btn": "Выход",
         "about_btn": "О программе",
         "dlg_about_title": "О программе Центр безопасности ClamAV",
@@ -3429,7 +3456,11 @@ def _validate_helper_log_path(log_path: str) -> str:
         raise PermissionError(f"Invalid log path: {cleaned}")
     if os.path.islink(cleaned):
         raise PermissionError(f"Refusing symlink log path: {cleaned}")
-    if IS_WINDOWS or _euid() != 0:
+    if IS_WINDOWS:
+        return cleaned
+    if _euid() != 0:
+        if cleaned.startswith("/var/log/") and not os.access(os.path.dirname(cleaned) or "/var/log", os.W_OK):
+            return str(APP_DATA_DIR / os.path.basename(cleaned))
         return cleaned
 
     parent = os.path.realpath(os.path.dirname(cleaned))
@@ -3453,6 +3484,9 @@ def _resolve_quarantine_dir(raw_qdir: Any) -> str:
         ):
             raise PermissionError("Root quarantine is restricted to DEFAULT_QUARANTINE_DIR")
         return DEFAULT_QUARANTINE_DIR
+    if (not IS_WINDOWS) and _euid() != 0:
+        if requested == "/root/quarantine" or requested.startswith("/root/"):
+            requested = str(APP_DATA_DIR / "quarantine")
     if os.path.islink(requested):
         raise PermissionError(f"Refusing symlink quarantine directory: {requested}")
     return requested
@@ -3686,6 +3720,7 @@ def build_systemd_schedule_units(
     scan_type: str,
     quick_targets: list[str],
     enabled: bool = True,
+    user_mode: bool = False,
 ) -> tuple[str, str, dict[str, Any]]:
     """Generate systemd service and timer unit contents for scheduled ClamAV scans."""
     day_map = {
@@ -3720,19 +3755,38 @@ def build_systemd_schedule_units(
     nice_bin = shutil.which("nice") or "/usr/bin/nice"
     ionice_bin = shutil.which("ionice") or "/usr/bin/ionice"
     chmod_bin = shutil.which("chmod") or "/usr/bin/chmod"
+    log_path = (
+        str(APP_DATA_DIR / "clamav-scan.log")
+        if user_mode and DEFAULT_LOG_PATH.startswith("/var/log/")
+        else DEFAULT_LOG_PATH
+    )
+    db_flag = ""
+    if user_mode:
+        db_dir = _default_db_dir()
+        if db_dir != "/var/lib/clamav" and _has_clamav_db_files(db_dir) and _is_safe_systemd_path(db_dir):
+            db_flag = f'--database="{db_dir}" '
 
     if stype == "full":
-        scan_args = (
-            f"{clamscan_bin} -r --exclude-dir=^/sys --exclude-dir=^/proc "
-            f"--exclude-dir=^/dev --exclude-dir=^/run --max-filesize=100M --max-scansize=100M "
-            f"--log={DEFAULT_LOG_PATH} /"
-        )
+        if user_mode:
+            home_str = str(Path.home())
+            full_target = home_str if _is_safe_systemd_path(home_str) else "/home"
+            scan_args = (
+                f"{clamscan_bin} -r {db_flag}--max-filesize=100M --max-scansize=100M "
+                f'--log="{log_path}" "{full_target}"'
+            )
+        else:
+            scan_args = (
+                f"{clamscan_bin} -r --exclude-dir=^/sys --exclude-dir=^/proc "
+                f"--exclude-dir=^/dev --exclude-dir=^/run --max-filesize=100M --max-scansize=100M "
+                f"--log={log_path} /"
+            )
     else:
         valid_q = [t for t in quick_targets if _is_safe_systemd_path(t)] or ["/home", "/tmp"]
         quoted_targets = " ".join(f'"{t}"' for t in valid_q)
+        log_arg = f'--log="{log_path}"' if user_mode else f"--log={log_path}"
         scan_args = (
-            f"{clamscan_bin} -r --max-filesize=100M --max-scansize=100M "
-            f"--log={DEFAULT_LOG_PATH} {quoted_targets}"
+            f"{clamscan_bin} -r {db_flag}--max-filesize=100M --max-scansize=100M "
+            f"{log_arg} {quoted_targets}"
         )
 
     cfg = {
@@ -3750,7 +3804,7 @@ def build_systemd_schedule_units(
         "Type=oneshot\n"
         "SuccessExitStatus=0 1\n"
         f"ExecStart={nice_bin} -n 19 {ionice_bin} -c 3 {scan_args}\n"
-        f"ExecStartPost=-{chmod_bin} 0644 {DEFAULT_LOG_PATH}\n"
+        f"ExecStartPost=-{chmod_bin} 0644 {log_path}\n"
     )
     timer_unit = (
         f"# CLAMAV_GUI_CONFIG={json.dumps(cfg)}\n"
@@ -3931,6 +3985,13 @@ def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
         _reap_spawned_proc(pid)
     else:
         os.kill(pid, getattr(signal, sig_name))
+        if sig_name == "SIGSTOP":
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline:
+                st = parse_proc_stat(pid)
+                if st is None or st.get("state") == "T":
+                    break
+                time.sleep(0.01)
     return {"pid": pid, "sig": sig_name}
 
 
@@ -3963,15 +4024,15 @@ def _helper_set_priority(params: dict[str, Any]) -> dict[str, Any]:
     ionice_cmd.extend(["-p", str(pid)])
     ionice_res = subprocess.run(ionice_cmd, capture_output=True, text=True, check=False)
 
-    if renice_res.returncode != 0:
+    if renice_res.returncode != 0 and _euid() == 0:
         raise RuntimeError(renice_res.stderr.strip() or renice_res.stdout.strip() or "renice failed")
-    if ionice_res.returncode != 0:
+    if ionice_res.returncode != 0 and _euid() == 0:
         raise RuntimeError(ionice_res.stderr.strip() or ionice_res.stdout.strip() or "ionice failed")
 
     return {
         "pid": pid,
         "mode": mode,
-        "renice": renice_res.stdout.strip(),
+        "renice": renice_res.stdout.strip() or renice_res.stderr.strip(),
     }
 
 
@@ -4144,6 +4205,11 @@ def _has_clamav_db_files(db_dir: str) -> bool:
 def _default_db_dir() -> str:
     """Return platform-appropriate ClamAV virus signature directory."""
     if not IS_WINDOWS:
+        if _has_clamav_db_files("/var/lib/clamav"):
+            return "/var/lib/clamav"
+        user_db = str(APP_DATA_DIR / "database")
+        if _has_clamav_db_files(user_db):
+            return user_db
         return "/var/lib/clamav"
     prog_data = os.environ.get("ProgramData") or r"C:\ProgramData"
     candidates = [os.path.join(prog_data, "ClamAV", "db")]
@@ -4168,28 +4234,32 @@ def _is_dir_writable(path: str) -> bool:
         return False
 
 
-def _ensure_windows_freshclam_config(freshclam_bin: str | None = None) -> tuple[str, str]:
-    """Ensure a valid, writable freshclam.conf and database dir exist on Windows."""
+def _ensure_windows_freshclam_config(
+    freshclam_bin: str | None = None,
+    force_user_dir: bool = False,
+) -> tuple[str, str]:
+    """Ensure a valid, writable freshclam.conf and database dir exist."""
     app_db = str(APP_DATA_DIR / "database")
     db_candidates: list[str] = []
-    if freshclam_bin:
-        db_candidates.append(os.path.join(os.path.dirname(freshclam_bin), "database"))
-    for d in _win_clamav_dirs():
-        db_candidates.append(os.path.join(d, "database"))
+    if not force_user_dir:
+        if freshclam_bin:
+            db_candidates.append(os.path.join(os.path.dirname(freshclam_bin), "database"))
+        for d in _win_clamav_dirs():
+            db_candidates.append(os.path.join(d, "database"))
     db_dir = app_db
     for cand in db_candidates:
         if _has_clamav_db_files(cand) and _is_dir_writable(cand):
             db_dir = cand
             break
     else:
-        if freshclam_bin:
+        if (not force_user_dir) and freshclam_bin:
             install_db = os.path.join(os.path.dirname(freshclam_bin), "database")
             if _is_dir_writable(install_db):
                 db_dir = install_db
     os.makedirs(db_dir, exist_ok=True)
 
     conf_path = str(APP_DATA_DIR / "freshclam.conf")
-    if freshclam_bin:
+    if (not force_user_dir) and freshclam_bin:
         install_dir = os.path.dirname(freshclam_bin)
         install_conf = os.path.join(install_dir, "freshclam.conf")
         if _is_dir_writable(install_dir) and (
@@ -4261,7 +4331,7 @@ def _detect_freshclam_services() -> tuple[list[str], str]:
     return active_units, ("active" if active_units else any_known_status)
 
 
-def _helper_run_freshclam(_params: dict[str, Any]) -> dict[str, Any]:
+def _helper_run_freshclam(params: dict[str, Any]) -> dict[str, Any]:
     win_candidates = tuple(os.path.join(d, "freshclam.exe") for d in _win_clamav_dirs()) if IS_WINDOWS else ()
     freshclam_bin = _find_binary_path(
         "freshclam",
@@ -4272,15 +4342,18 @@ def _helper_run_freshclam(_params: dict[str, Any]) -> dict[str, Any]:
     if not freshclam_bin or not os.path.exists(freshclam_bin):
         raise FileNotFoundError("freshclam binary not found")
 
-    if IS_WINDOWS:
-        conf_path, db_dir = _ensure_windows_freshclam_config(freshclam_bin)
+    if IS_WINDOWS or bool(params.get("user_mode")):
+        conf_path, db_dir = _ensure_windows_freshclam_config(
+            freshclam_bin,
+            force_user_dir=(not IS_WINDOWS) and bool(params.get("user_mode")),
+        )
         update_res = subprocess.run(
             [freshclam_bin, f"--config-file={conf_path}", f"--datadir={db_dir}"],
             capture_output=True,
             text=True,
             timeout=180,
             check=False,
-            creationflags=_SUBPROCESS_NO_WINDOW,
+            creationflags=_SUBPROCESS_NO_WINDOW if IS_WINDOWS else 0,
         )
         notes = [f"Config: {conf_path}", f"Database: {db_dir}"]
         combined = "\n".join(
@@ -4705,18 +4778,31 @@ def _helper_windows_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
     return _helper_windows_get_schedule()
 
 
-def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
+def _is_user_schedule_mode(params: dict[str, Any] | None = None) -> bool:
+    if IS_WINDOWS:
+        return False
+    if params and "user_mode" in params:
+        return bool(params["user_mode"])
+    if not SYSTEMD_TIMER_PATH.startswith("/etc/"):
+        return False
+    return _euid() != 0
+
+
+def _helper_get_schedule(params: dict[str, Any]) -> dict[str, Any]:
     if IS_WINDOWS:
         return _helper_windows_get_schedule()
+    user_mode = _is_user_schedule_mode(params)
+    tmr_path = USER_SYSTEMD_TIMER_PATH if user_mode else SYSTEMD_TIMER_PATH
+    systemctl_cmd = ["systemctl", "--user"] if user_mode else ["systemctl"]
     cfg: dict[str, Any] = {
         "frequency": "weekly",
         "day_of_week": "Sun",
         "time_of_day": "03:00",
         "scan_type": "quick",
     }
-    if os.path.exists(SYSTEMD_TIMER_PATH):
+    if os.path.exists(tmr_path):
         try:
-            with open(SYSTEMD_TIMER_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            with open(tmr_path, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if line.startswith("# CLAMAV_GUI_CONFIG="):
                         parsed = json.loads(line.split("=", 1)[1].strip())
@@ -4727,17 +4813,24 @@ def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
             pass
 
     enabled_res = subprocess.run(
-        ["systemctl", "is-enabled", "clamav-gui-scan.timer"],
+        [*systemctl_cmd, "is-enabled", "clamav-gui-scan.timer"],
         capture_output=True,
         text=True,
         check=False,
     )
     enabled = enabled_res.returncode == 0 and enabled_res.stdout.strip() == "enabled"
+    if (
+        user_mode
+        and not enabled
+        and os.path.exists(tmr_path)
+        and ("connect to bus" in (enabled_res.stderr or "").lower() or "failed to connect" in (enabled_res.stderr or "").lower())
+    ):
+        enabled = bool(cfg.get("enabled", False))
 
     next_run = "-"
     if enabled:
         list_res = subprocess.run(
-            ["systemctl", "list-timers", "clamav-gui-scan.timer", "--no-pager", "--no-legend"],
+            [*systemctl_cmd, "list-timers", "clamav-gui-scan.timer", "--no-pager", "--no-legend"],
             capture_output=True,
             text=True,
             check=False,
@@ -4757,6 +4850,10 @@ def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
 def _helper_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
     if IS_WINDOWS:
         return _helper_windows_set_schedule(params)
+    user_mode = _is_user_schedule_mode(params)
+    svc_path = USER_SYSTEMD_SERVICE_PATH if user_mode else SYSTEMD_SERVICE_PATH
+    tmr_path = USER_SYSTEMD_TIMER_PATH if user_mode else SYSTEMD_TIMER_PATH
+    systemctl_cmd = ["systemctl", "--user"] if user_mode else ["systemctl"]
     enabled = bool(params.get("enabled", False))
     frequency = str(params.get("frequency") or "weekly")
     day_of_week = str(params.get("day_of_week") or "Sun")
@@ -4771,26 +4868,31 @@ def _helper_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
         scan_type,
         quick_targets,
         enabled=enabled,
+        user_mode=user_mode,
     )
-    with open(SYSTEMD_SERVICE_PATH, "w", encoding="utf-8") as fh:
+    os.makedirs(os.path.dirname(svc_path), exist_ok=True)
+    os.makedirs(os.path.dirname(tmr_path), exist_ok=True)
+    with open(svc_path, "w", encoding="utf-8") as fh:
         fh.write(service_txt)
-    with open(SYSTEMD_TIMER_PATH, "w", encoding="utf-8") as fh:
+    with open(tmr_path, "w", encoding="utf-8") as fh:
         fh.write(timer_txt)
-    os.chmod(SYSTEMD_SERVICE_PATH, 0o644)
-    os.chmod(SYSTEMD_TIMER_PATH, 0o644)
+    os.chmod(svc_path, 0o644)
+    os.chmod(tmr_path, 0o644)
 
-    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, text=True, check=True)
+    subprocess.run([*systemctl_cmd, "daemon-reload"], capture_output=True, text=True, check=not user_mode)
     action = ["enable", "--now"] if enabled else ["disable", "--now"]
     res = subprocess.run(
-        ["systemctl", *action, "clamav-gui-scan.timer"],
+        [*systemctl_cmd, *action, "clamav-gui-scan.timer"],
         capture_output=True,
         text=True,
         check=False,
     )
     if enabled and res.returncode != 0:
-        raise RuntimeError(res.stderr.strip() or res.stdout.strip() or "Failed enabling timer")
+        err_low = (res.stderr or "").lower()
+        if not (user_mode and ("connect to bus" in err_low or "failed to connect" in err_low)):
+            raise RuntimeError(res.stderr.strip() or res.stdout.strip() or "Failed enabling timer")
 
-    return _helper_get_schedule({})
+    return _helper_get_schedule({"user_mode": True} if user_mode else {})
 
 
 HELPER_HANDLERS = {
@@ -4967,7 +5069,21 @@ class HelperClient:
 
     @property
     def is_connected(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None and self.uid is not None
+
+    @property
+    def is_root(self) -> bool:
         return self._proc is not None and self._proc.poll() is None and (self.uid == 0 or IS_WINDOWS)
+
+    @property
+    def is_user_mode(self) -> bool:
+        return (
+            self._proc is not None
+            and self._proc.poll() is None
+            and self.uid is not None
+            and self.uid != 0
+            and not IS_WINDOWS
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -6330,6 +6446,15 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.pkexec_btn.setStyleSheet(pill_btn_css)
             self.pkexec_btn.clicked.connect(self._unlock_pkexec)
             auth_layout.addWidget(self.pkexec_btn)
+
+            self.user_mode_btn = self._reg_text(QPushButton(), "user_mode_btn")
+            self.user_mode_btn.setIcon(
+                _theme_icon("user-identity", "system-users", "folder-home")
+            )
+            if pill_btn_css:
+                self.user_mode_btn.setStyleSheet(pill_btn_css)
+            self.user_mode_btn.clicked.connect(self._activate_user_mode)
+            auth_layout.addWidget(self.user_mode_btn)
             root.addWidget(self.auth_banner)
 
             # Plain-English Hero Status Banner (mockup_1: 48x48 HiDPI vector shield + clean copy + CTA)
@@ -7187,6 +7312,25 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             connected = self.helper.is_connected
             self.auth_banner.setVisible(not connected)
             self.root_badge_lbl.setVisible(connected)
+            if connected:
+                if self.helper.is_user_mode:
+                    self.root_badge_lbl.setText(self._tr("user_mode_badge"))
+                    self.root_badge_lbl.setStyleSheet(
+                        "color: #1d4ed8; font-weight: 600; padding: 5px 13px; "
+                        "background-color: #dbeafe; border: 1px solid #bfdbfe; border-radius: 14px;"
+                        if not self._dark
+                        else "color: #60a5fa; font-weight: bold; padding: 5px 13px; "
+                        "background-color: rgba(37, 99, 235, 0.22); border: 1px solid rgba(96, 165, 250, 0.35); border-radius: 14px;"
+                    )
+                else:
+                    self.root_badge_lbl.setText(self._tr("root_active_badge"))
+                    self.root_badge_lbl.setStyleSheet(
+                        "color: #147a4c; font-weight: 600; padding: 5px 13px; "
+                        "background-color: #d7f3e4; border: 1px solid #b5e7cd; border-radius: 14px;"
+                        if not self._dark
+                        else "color: #34d399; font-weight: bold; padding: 5px 13px; "
+                        "background-color: rgba(31, 138, 91, 0.22); border: 1px solid rgba(52, 211, 153, 0.35); border-radius: 14px;"
+                    )
             if not connected:
                 self.auth_banner.setStyleSheet(
                     "#AuthBanner { border: 1px solid #d9e2ec; border-radius: 12px; "
@@ -7351,6 +7495,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._reset_log_state(reset_offset=True)
             self._update_auth_banner()
             self._update_controls_enabled()
+            self._update_command_preview()
             self._poll_tick()
             self._refresh_quarantine()
             self._refresh_schedule()
@@ -7625,33 +7770,44 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     return f"{day_name[:3]} {time_val}"
                 return self._tr("idle_val_daily_at", time=time_val)
 
-            if not os.path.exists(SYSTEMD_TIMER_PATH) or not os.access(SYSTEMD_TIMER_PATH, os.R_OK):
-                return self._tr("idle_val_not_sched")
-            try:
-                with open(SYSTEMD_TIMER_PATH, "r", encoding="utf-8", errors="replace") as fh:
-                    text = fh.read()
-            except OSError:
-                return self._tr("idle_val_not_sched")
-            for raw in text.splitlines():
-                if raw.startswith("# CLAMAV_GUI_CONFIG="):
-                    try:
-                        cfg = json.loads(raw.split("=", 1)[1].strip())
-                        if isinstance(cfg, dict) and cfg.get("enabled") is False:
-                            return self._tr("idle_val_not_sched")
-                    except json.JSONDecodeError:
-                        pass
-            for raw in text.splitlines():
-                if raw.strip().startswith("OnCalendar="):
-                    val = raw.split("=", 1)[1].strip()
-                    m_day = re.match(r"^([A-Za-z]+)\s+\*-\*-\*\s+(\d{2}:\d{2})", val)
-                    if m_day:
-                        day_key = f"day_{m_day.group(1)[:3].lower()}"
-                        day_name = self._tr(day_key) if day_key in TRANSLATIONS.get(self.lang, {}) else m_day.group(1)
-                        return f"{day_name[:3]} {m_day.group(2)}"
-                    m_daily = re.match(r"^(?:daily|\*-\*-\*)\s+(\d{2}:\d{2})", val)
-                    if m_daily:
-                        return self._tr("idle_val_daily_at", time=m_daily.group(1))
-                    return val[:20]
+            if not SYSTEMD_TIMER_PATH.startswith("/etc/") and not self.helper.is_user_mode:
+                timer_paths = [SYSTEMD_TIMER_PATH]
+            elif self.helper.is_user_mode:
+                timer_paths = [USER_SYSTEMD_TIMER_PATH, SYSTEMD_TIMER_PATH]
+            else:
+                timer_paths = [SYSTEMD_TIMER_PATH, USER_SYSTEMD_TIMER_PATH]
+
+            for tmr_path in timer_paths:
+                if not os.path.exists(tmr_path) or not os.access(tmr_path, os.R_OK):
+                    continue
+                try:
+                    with open(tmr_path, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                disabled_in_cfg = False
+                for raw in text.splitlines():
+                    if raw.startswith("# CLAMAV_GUI_CONFIG="):
+                        try:
+                            cfg = json.loads(raw.split("=", 1)[1].strip())
+                            if isinstance(cfg, dict) and cfg.get("enabled") is False:
+                                disabled_in_cfg = True
+                        except json.JSONDecodeError:
+                            pass
+                if disabled_in_cfg:
+                    return self._tr("idle_val_not_sched")
+                for raw in text.splitlines():
+                    if raw.strip().startswith("OnCalendar="):
+                        val = raw.split("=", 1)[1].strip()
+                        m_day = re.match(r"^([A-Za-z]+)\s+\*-\*-\*\s+(\d{2}:\d{2})", val)
+                        if m_day:
+                            day_key = f"day_{m_day.group(1)[:3].lower()}"
+                            day_name = self._tr(day_key) if day_key in TRANSLATIONS.get(self.lang, {}) else m_day.group(1)
+                            return f"{day_name[:3]} {m_day.group(2)}"
+                        m_daily = re.match(r"^(?:daily|\*-\*-\*)\s+(\d{2}:\d{2})", val)
+                        if m_daily:
+                            return self._tr("idle_val_daily_at", time=m_daily.group(1))
+                        return val[:20]
             return self._tr("idle_val_not_sched")
 
         def _sync_stat_card_titles(self, proc: dict[str, Any] | None) -> None:
@@ -8153,6 +8309,31 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, self._tr("dlg_restart_err"), str(exc))
 
+        def _active_log_path(self) -> str:
+            if self.helper.is_user_mode and DEFAULT_LOG_PATH.startswith("/var/log/"):
+                return str(APP_DATA_DIR / os.path.basename(DEFAULT_LOG_PATH))
+            return DEFAULT_LOG_PATH
+
+        def _active_quarantine_dir(self) -> str:
+            if self.helper.is_user_mode and DEFAULT_QUARANTINE_DIR.startswith("/root"):
+                return str(APP_DATA_DIR / "quarantine")
+            return DEFAULT_QUARANTINE_DIR
+
+        def _activate_user_mode(self) -> bool:
+            ok, msg = self.helper.start_local()
+            if not ok:
+                QMessageBox.warning(self, self._tr("dlg_auth_failed"), msg)
+                return False
+            user_log = self._active_log_path()
+            if self.log_path_edit.text().strip().startswith("/var/log/"):
+                self.log_path_edit.setText(user_log)
+            if self.new_log_edit.text().strip().startswith("/var/log/"):
+                self.new_log_edit.setText(user_log)
+            if self.telemetry.log_path.startswith("/var/log/"):
+                self.telemetry.log_path = user_log
+            self._on_root_unlocked()
+            return True
+
         def _require_root_helper(self) -> bool:
             if self.helper.is_connected:
                 return True
@@ -8169,6 +8350,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             box.setInformativeText(self._tr("dlg_root_req_info"))
             btn_sudo = box.addButton(self._tr("dlg_unlock_pw_btn"), QMessageBox.ButtonRole.AcceptRole)
             btn_polkit = box.addButton(self._tr("unlock_polkit_btn"), QMessageBox.ButtonRole.ActionRole)
+            btn_user = box.addButton(self._tr("continue_user_mode_btn"), QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Cancel)
             box.exec()
             clicked = box.clickedButton()
@@ -8176,6 +8358,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 return self._unlock_sudo()
             if clicked == btn_polkit:
                 self._unlock_pkexec()
+                return False
+            if clicked == btn_user:
+                return self._activate_user_mode()
             return False
 
         def _reset_after_scan_exit(self, pid: int) -> None:
@@ -8283,10 +8468,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not sel or not self._require_root_helper():
                 return
             row, path, sig = sel
+            qdir = self._active_quarantine_dir()
             ans = QMessageBox.question(
                 self,
                 self._tr("dlg_quar_title"),
-                self._tr("dlg_quar_msg", path=path, qdir=DEFAULT_QUARANTINE_DIR),
+                self._tr("dlg_quar_msg", path=path, qdir=qdir),
             )
             if ans != QMessageBox.StandardButton.Yes:
                 return
@@ -8295,7 +8481,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     "quarantine_file",
                     {
                         "path": path,
-                        "quarantine_dir": DEFAULT_QUARANTINE_DIR,
+                        "quarantine_dir": qdir,
                         "threat_name": sig,
                     },
                 )
@@ -8329,7 +8515,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not self.helper.is_connected:
                 return
             try:
-                res = self.helper.call("list_quarantine", {"quarantine_dir": DEFAULT_QUARANTINE_DIR})
+                res = self.helper.call("list_quarantine", {"quarantine_dir": self._active_quarantine_dir()})
                 items = res.get("items") or []
                 self.quarantine_table.setRowCount(0)
                 for item in items:
@@ -8383,7 +8569,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             try:
                 res = self.helper.call(
                     "restore_quarantine",
-                    {"name": name, "dest_path": dest_path, "quarantine_dir": DEFAULT_QUARANTINE_DIR},
+                    {"name": name, "dest_path": dest_path, "quarantine_dir": self._active_quarantine_dir()},
                 )
                 QMessageBox.information(
                     self, self._tr("dlg_restore_ok_title"), self._tr("dlg_restore_ok_msg", dest=res["restored_to"])
@@ -8410,7 +8596,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             try:
                 self.helper.call(
                     "delete_quarantine",
-                    {"name": name, "quarantine_dir": DEFAULT_QUARANTINE_DIR},
+                    {"name": name, "quarantine_dir": self._active_quarantine_dir()},
                 )
                 self._refresh_quarantine()
             except Exception as exc:  # noqa: BLE001
@@ -8426,17 +8612,25 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 (str(item.get("date", ""))[:16], int(item.get("threats", 0))) for item in combined
             }
 
-            if os.path.exists(DEFAULT_LOG_PATH) and os.access(DEFAULT_LOG_PATH, os.R_OK):
-                try:
-                    with open(DEFAULT_LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
-                        log_text = fh.read()
-                    for entry in reversed(parse_scan_summaries_from_log(log_text)):
-                        key = (str(entry.get("date", ""))[:16], int(entry.get("threats", 0)))
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            combined.append(entry)
-                except OSError:
-                    pass
+            log_candidates: list[str] = []
+            for cand in (DEFAULT_LOG_PATH, str(APP_DATA_DIR / "clamav-scan.log")):
+                if cand and cand not in log_candidates:
+                    if cand == DEFAULT_LOG_PATH or (
+                        not IS_WINDOWS and (DEFAULT_LOG_PATH.startswith("/var/log/") or self.helper.is_user_mode)
+                    ):
+                        log_candidates.append(cand)
+            for log_p in log_candidates:
+                if os.path.exists(log_p) and os.access(log_p, os.R_OK):
+                    try:
+                        with open(log_p, "r", encoding="utf-8", errors="replace") as fh:
+                            log_text = fh.read()
+                        for entry in reversed(parse_scan_summaries_from_log(log_text)):
+                            key = (str(entry.get("date", ""))[:16], int(entry.get("threats", 0)))
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+                                combined.append(entry)
+                    except OSError:
+                        pass
 
             combined.sort(key=lambda item: str(item.get("date", "")), reverse=True)
             self._latest_scan_entry = combined[0] if combined else None
@@ -8476,7 +8670,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not self.helper.is_connected:
                 return
             try:
-                res = self.helper.call("get_schedule", {})
+                res = self.helper.call("get_schedule", {"user_mode": True} if self.helper.is_user_mode else {})
                 self.sched_enabled_chk.setChecked(bool(res.get("enabled")))
                 idx_type = self.sched_type_combo.findData(res.get("scan_type", "quick"))
                 if idx_type >= 0:
@@ -8500,17 +8694,17 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not self._require_root_helper():
                 return
             try:
-                res = self.helper.call(
-                    "set_schedule",
-                    {
-                        "enabled": self.sched_enabled_chk.isChecked(),
-                        "scan_type": self.sched_type_combo.currentData(),
-                        "frequency": self.sched_freq_combo.currentData(),
-                        "day_of_week": self.sched_day_combo.currentData(),
-                        "time_of_day": self.sched_time_edit.time().toString("HH:mm"),
-                        "quick_targets": get_quick_scan_targets(),
-                    },
-                )
+                sched_payload: dict[str, Any] = {
+                    "enabled": self.sched_enabled_chk.isChecked(),
+                    "scan_type": self.sched_type_combo.currentData(),
+                    "frequency": self.sched_freq_combo.currentData(),
+                    "day_of_week": self.sched_day_combo.currentData(),
+                    "time_of_day": self.sched_time_edit.time().toString("HH:mm"),
+                    "quick_targets": get_quick_scan_targets(),
+                }
+                if self.helper.is_user_mode:
+                    sched_payload["user_mode"] = True
+                res = self.helper.call("set_schedule", sched_payload)
                 state_txt = self._tr("sched_enabled" if res.get("enabled") else "sched_disabled")
                 self.sched_status_lbl.setText(
                     self._tr("sched_saved_status", state=state_txt, next_run=res.get("next_run", "-"))
@@ -8544,14 +8738,16 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             args.append(f"--max-filesize={mb}M")
             args.append(f"--max-scansize={mb}M")
 
-            if IS_WINDOWS and _has_clamav_db_files(_default_db_dir()):
-                args.append(f"--database={_default_db_dir()}")
+            db_dir = _default_db_dir()
+            if (IS_WINDOWS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
+                args.append(f"--database={db_dir}")
 
             action = str(self.infected_action_combo.currentData())
+            qdir = self._active_quarantine_dir()
             if action == "move":
-                args.append(f"--move={DEFAULT_QUARANTINE_DIR}")
+                args.append(f"--move={qdir}")
             elif action == "copy":
-                args.append(f"--copy={DEFAULT_QUARANTINE_DIR}")
+                args.append(f"--copy={qdir}")
 
             log_path = self.new_log_edit.text().strip()
             if log_path:
@@ -8571,10 +8767,14 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             label: str,
             exclude_virtual: bool = False,
             raw_args: list[str] | None = None,
-            log_path: str = DEFAULT_LOG_PATH,
+            log_path: str | None = None,
         ) -> None:
             if not self._require_root_helper():
                 return
+            if log_path is None:
+                log_path = self._active_log_path()
+            elif self.helper.is_user_mode and log_path.startswith("/var/log/"):
+                log_path = self._active_log_path()
             if self._known_procs:
                 ans = QMessageBox.question(
                     self,
@@ -8592,8 +8792,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     for excl in ("^/sys", "^/proc", "^/dev", "^/run"):
                         args.append(f"--exclude-dir={excl}")
                 args.extend(["--max-filesize=100M", "--max-scansize=100M"])
-                if IS_WINDOWS and _has_clamav_db_files(_default_db_dir()):
-                    args.append(f"--database={_default_db_dir()}")
+                db_dir = _default_db_dir()
+                if (IS_WINDOWS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
+                    args.append(f"--database={db_dir}")
                 if log_path:
                     args.append(f"--log={log_path}")
                 args.extend(targets)
@@ -8609,9 +8810,10 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                         except Exception:  # noqa: BLE001
                             pass
                 self.telemetry.selected_pid = new_pid
-                if log_path:
-                    self.log_path_edit.setText(log_path)
-                    self.telemetry.log_path = log_path
+                actual_log = str(res.get("log_path") or log_path or "")
+                if actual_log:
+                    self.log_path_edit.setText(actual_log)
+                    self.telemetry.log_path = actual_log
                 if self.tabs.isVisible():
                     self.tabs.setCurrentIndex(0)
                 self._poll_tick()
@@ -8658,10 +8860,11 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.freshclam_btn.setEnabled(False)
             self.freshclam_btn.setText(self._tr("freshclam_updating"))
             self.freshclam_output.setPlainText(self._tr("freshclam_running_msg"))
+            fc_params = {"user_mode": True} if self.helper.is_user_mode else {}
 
             def _worker() -> None:
                 try:
-                    res = self.helper.call("run_freshclam", {}, timeout=185.0)
+                    res = self.helper.call("run_freshclam", fc_params, timeout=185.0)
                     out = res.get("output", "")
                     self.signals.freshclam_done.emit(bool(res.get("success")), out)
                 except Exception as exc:  # noqa: BLE001

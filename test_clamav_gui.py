@@ -1516,5 +1516,169 @@ class TestWindowsCompatibility(unittest.TestCase):
                 app_mod.DEFAULT_LOG_PATH = orig_log
 
 
+class TestUserModeFallback(unittest.TestCase):
+    """Tests for unprivileged User Mode path remapping, DB/freshclam, priority tolerance, and systemd --user schedules."""
+
+    def test_helper_client_user_mode_properties(self) -> None:
+        client = app_mod.HelperClient()
+        fake_proc = mock.Mock()
+        fake_proc.poll.return_value = None
+        client._proc = fake_proc
+
+        with mock.patch.object(app_mod, "IS_WINDOWS", False):
+            client.uid = 1000
+            self.assertTrue(client.is_connected)
+            self.assertFalse(client.is_root)
+            self.assertTrue(client.is_user_mode)
+
+            client.uid = 0
+            self.assertTrue(client.is_connected)
+            self.assertTrue(client.is_root)
+            self.assertFalse(client.is_user_mode)
+        client._proc = None
+
+    @unittest.skipIf(os.name == "nt", "POSIX path remapping test")
+    def test_user_mode_log_and_quarantine_path_remapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "_euid", return_value=1000),
+                    mock.patch("os.access", side_effect=lambda p, _m: not str(p).startswith("/var/log")),
+                ):
+                    remapped_log = app_mod._validate_helper_log_path("/var/log/clamav-scan.log")
+                    self.assertEqual(remapped_log, str(app_mod.APP_DATA_DIR / "clamav-scan.log"))
+
+                    remapped_qdir = app_mod._resolve_quarantine_dir("/root/quarantine")
+                    self.assertEqual(remapped_qdir, str(app_mod.APP_DATA_DIR / "quarantine"))
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+
+    @unittest.skipIf(os.name == "nt", "POSIX user-mode freshclam and priority test")
+    def test_user_mode_freshclam_and_priority_tolerance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                fc_bin = root / "freshclam"
+                fc_bin.write_text("", encoding="utf-8")
+                fc_bin.chmod(0o755)
+                cmds: list[list[str]] = []
+
+                def _fake_run(cmd: list[str], **_kw: object) -> mock.Mock:
+                    cmds.append(list(cmd))
+                    return mock.Mock(returncode=0, stdout="Database updated\n", stderr="")
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "_find_binary_path", return_value=str(fc_bin)),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res = app_mod._helper_run_freshclam({"user_mode": True})
+
+                self.assertTrue(res["success"])
+                expected_conf = str(app_mod.APP_DATA_DIR / "freshclam.conf")
+                expected_db = str(app_mod.APP_DATA_DIR / "database")
+                self.assertTrue(Path(expected_conf).is_file())
+                self.assertTrue(Path(expected_db).is_dir())
+                self.assertEqual(
+                    cmds[0],
+                    [str(fc_bin), f"--config-file={expected_conf}", f"--datadir={expected_db}"],
+                )
+
+                # _default_db_dir selects user DB dir on Linux when /var/lib/clamav lacks DB files
+                (Path(expected_db) / "main.cvd").write_bytes(b"CVD")
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(
+                        app_mod,
+                        "_has_clamav_db_files",
+                        side_effect=lambda d: d == expected_db,
+                    ),
+                ):
+                    self.assertEqual(app_mod._default_db_dir(), expected_db)
+
+                # Lowering nice back to 0 without root does not crash in User Mode
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "_euid", return_value=1000),
+                    mock.patch.object(app_mod, "_validate_clamscan_pid"),
+                    mock.patch(
+                        "subprocess.run",
+                        return_value=mock.Mock(returncode=1, stdout="", stderr="renice: Permission denied"),
+                    ),
+                ):
+                    prio = app_mod._helper_set_priority({"pid": 4321, "mode": "normal"})
+                self.assertEqual(prio["mode"], "normal")
+                self.assertIn("Permission denied", prio["renice"])
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+
+    @unittest.skipIf(os.name == "nt", "POSIX systemd --user schedule test")
+    def test_user_mode_systemd_schedule_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            orig_svc = app_mod.USER_SYSTEMD_SERVICE_PATH
+            orig_tmr = app_mod.USER_SYSTEMD_TIMER_PATH
+            orig_log = app_mod.DEFAULT_LOG_PATH
+            cmds: list[list[str]] = []
+            enabled_state = {"val": True}
+
+            def _fake_run(cmd: list[str], **_kw: object) -> mock.Mock:
+                cmds.append(list(cmd))
+                if cmd[:3] == ["systemctl", "--user", "enable"]:
+                    enabled_state["val"] = True
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                if cmd[:3] == ["systemctl", "--user", "is-enabled"]:
+                    return mock.Mock(
+                        returncode=0 if enabled_state["val"] else 1,
+                        stdout="enabled\n" if enabled_state["val"] else "disabled\n",
+                        stderr="",
+                    )
+                if cmd[:3] == ["systemctl", "--user", "list-timers"]:
+                    return mock.Mock(returncode=0, stdout="Thu 2026-11-26 05:30:00 CET\n", stderr="")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                app_mod.DEFAULT_LOG_PATH = "/var/log/clamav-scan.log"
+                app_mod.USER_SYSTEMD_SERVICE_PATH = str(root / "cfg" / "systemd" / "user" / "clamav-gui-scan.service")
+                app_mod.USER_SYSTEMD_TIMER_PATH = str(root / "cfg" / "systemd" / "user" / "clamav-gui-scan.timer")
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res = app_mod._helper_set_schedule(
+                        {
+                            "enabled": True,
+                            "user_mode": True,
+                            "frequency": "weekly",
+                            "day_of_week": "Thu",
+                            "time_of_day": "05:30",
+                            "scan_type": "full",
+                            "quick_targets": [tmpdir],
+                        }
+                    )
+                self.assertTrue(res["enabled"])
+                self.assertEqual(res["day_of_week"], "Thu")
+                self.assertIn("2026-11-26", res["next_run"])
+                svc_txt = Path(app_mod.USER_SYSTEMD_SERVICE_PATH).read_text(encoding="utf-8")
+                self.assertIn(str(app_mod.APP_DATA_DIR / "clamav-scan.log"), svc_txt)
+                self.assertIn(f'"{Path.home()}"' if app_mod._is_safe_systemd_path(str(Path.home())) else '"/home"', svc_txt)
+                self.assertIn(["systemctl", "--user", "daemon-reload"], cmds)
+                self.assertIn(["systemctl", "--user", "enable", "--now", "clamav-gui-scan.timer"], cmds)
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+                app_mod.USER_SYSTEMD_SERVICE_PATH = orig_svc
+                app_mod.USER_SYSTEMD_TIMER_PATH = orig_tmr
+                app_mod.DEFAULT_LOG_PATH = orig_log
+
+
 if __name__ == "__main__":
     unittest.main()
