@@ -191,14 +191,15 @@ class TestUILocalizationAndPersistence(unittest.TestCase):
                         self.assertEqual(win.lang, "de")
                         self.assertIn("Sicherheitszentrum", win.windowTitle())
                         self.assertEqual(win.app_title_lbl.text(), "ClamAV Sicherheitszentrum")
-                        self.assertEqual(win.hero_title_lbl.text(), "System geschützt — Keine aktiven Bedrohungen erkannt")
+                        self.assertEqual(win.hero_title_lbl.text(), "Ihr Computer ist geschützt")
                         self.assertIn("Schnellscan", win.btn_quick_scan.text())
                         self.assertIn("Vollständiger", win.btn_full_scan.text())
                         self.assertIn("scannen", win.btn_pick_scan.text())
-                        self.assertEqual(win.card_status.title_lbl.text(), "Scan-Status")
-                        self.assertEqual(win.card_cpu.title_lbl.text(), "Laufzeit / Aktivität")
-                        self.assertEqual(win.card_io.title_lbl.text(), "RAM / Festplatte gelesen")
-                        self.assertEqual(win.card_threats.title_lbl.text(), "Gefundene Bedrohungen")
+                        self.assertTrue(win.ctrl_box.isHidden())
+                        self.assertEqual(win.card_status.title_lbl.text(), "Status")
+                        self.assertEqual(win.card_cpu.title_lbl.text(), "Letzter Scan")
+                        self.assertEqual(win.card_io.title_lbl.text(), "Virensignaturen")
+                        self.assertEqual(win.card_threats.title_lbl.text(), "Geplanter Scan")
                         self.assertEqual(win.progress_bar.text(), "Inaktiv")
                         self.assertEqual(win.tabs.tabText(0), "Live-Ausgabe & Protokoll")
                         self.assertEqual(win.tabs.tabText(2), "Quarantäne (0)")
@@ -220,7 +221,7 @@ class TestUILocalizationAndPersistence(unittest.TestCase):
 
                         self.assertEqual(win.lang, "en")
                         self.assertEqual(win.app_title_lbl.text(), "ClamAV Security Center")
-                        self.assertEqual(win.hero_title_lbl.text(), "System Protected — No Active Threats Detected")
+                        self.assertEqual(win.hero_title_lbl.text(), "Your computer is protected")
                         self.assertEqual(win.tabs.tabText(0), "Live Output & Log")
                         self.assertEqual(win.threats_table.horizontalHeaderItem(0).text(), "File Path")
                         self.assertEqual(win.quarantine_table.horizontalHeaderItem(0).text(), "File Name")
@@ -328,7 +329,7 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
             self.win._on_pkexec_done(False, "Cancelled", False)
         mock_warn.assert_called_once()
         self.assertTrue(self.win.pkexec_btn.isEnabled())
-        self.assertEqual(self.win.pkexec_btn.text(), "Unlock via System Polkit")
+        self.assertEqual(self.win.pkexec_btn.text(), "Unlock via Polkit")
 
         # _require_root_helper Cancel -> returns False
         with mock.patch.object(QMessageBox, "exec", return_value=0), mock.patch.object(
@@ -970,7 +971,7 @@ class TestUIGNOMECompatibility(unittest.TestCase, _UIEnvMixin):
             self.win._reveal_threat_in_dolphin()
         mock_popen.assert_called_once_with(["nautilus", "--select", "/tmp/gnome_test"], start_new_session=True)
         self.assertEqual(self.win.windowTitle(), "ClamAV Security Center")
-        self.assertEqual(self.win.pkexec_btn.text(), "Unlock via System Polkit")
+        self.assertEqual(self.win.pkexec_btn.text(), "Unlock via Polkit")
 
 
 class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
@@ -1050,7 +1051,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
         }
         with mock.patch.object(app_mod, "get_clamav_metadata", return_value=ok_meta):
             self.win._refresh_metadata()
-        self.assertEqual(self.win.hero_title_lbl.text(), "System Protected — No Active Threats Detected")
+        self.assertEqual(self.win.hero_title_lbl.text(), "Your computer is protected")
         self.assertTrue(self.win.hero_db_btn.isHidden())
 
     def test_mockup_lang_pills_tiles_inspect_error_and_german_history(self) -> None:
