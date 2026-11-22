@@ -1090,15 +1090,18 @@ class TestSecurityHardening(unittest.TestCase):
             fake_desk = root / "clamav-kde-gui.desktop"
             fake_desk.write_text(
                 f"[Desktop Entry]\nType=Application\nName=ClamAV Security Center\nName[de]=ClamAV Sicherheitszentrum\n"
-                f"Exec={fake_bin}\nIcon=security-high\nCategories=System;Security;Qt;KDE;GNOME;\n",
+                f"Exec={fake_bin}\nIcon=clamav-kde-gui\nCategories=System;Security;Qt;KDE;GNOME;\n",
                 encoding="utf-8",
             )
+            fake_icon = root / "clamav-kde-gui.svg"
+            fake_icon.write_text("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'/>", encoding="utf-8")
             with (
                 mock.patch.object(vos, "INSTALLED_BIN", fake_bin),
                 mock.patch.object(vos, "INSTALLED_ALIAS", fake_alias),
                 mock.patch.object(vos, "INSTALLED_PY", Path(app_mod.SCRIPT_PATH)),
                 mock.patch.object(vos, "INSTALLED_RUN", fake_run),
                 mock.patch.object(vos, "INSTALLED_DESKTOP", fake_desk),
+                mock.patch.object(vos, "INSTALLED_ICON", fake_icon),
                 mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="pkg-1.0", stderr="")),
             ):
                 vos.verify_package_files("rpm")

@@ -4678,6 +4678,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         painter.end()
         return pm
 
+    def _build_app_icon(bg_hex: str = "#1f9d68", symbol: str = "check") -> QIcon:
+        """Build a multi-size QIcon using the app's faceted vector shield artwork."""
+        icon = QIcon()
+        for px in (16, 22, 24, 32, 48, 64, 128):
+            icon.addPixmap(_draw_shield_pixmap(px, bg_hex, symbol))
+        return icon
+
     def _draw_tile_pixmap(kind: str, size: int = 56) -> QPixmap:
         """Render 3x HiDPI vector illustrations matching mockup_1 tiles."""
         dpr = 3.0
@@ -4978,7 +4985,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._freshclam_running = False
 
             self.setWindowTitle(self._tr("window_title"))
-            self.setWindowIcon(QIcon.fromTheme("security-high"))
+            self.setWindowIcon(_build_app_icon())
             self._dark = _is_dark_theme()
             self.resize(980, 560)
             self.setAcceptDrops(True)
@@ -5104,7 +5111,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         def _setup_tray(self) -> None:
             if not QSystemTrayIcon.isSystemTrayAvailable():
                 return
-            tray = QSystemTrayIcon(_theme_icon("security-high", "dialog-information"), self)
+            tray = QSystemTrayIcon(_build_app_icon(), self)
             tray.setToolTip(self._tr("tray_tip_idle", count=0))
 
             menu = QMenu(self)
@@ -5168,7 +5175,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                         "-u",
                         urgency,
                         "-i",
-                        "security-high",
+                        "clamav-kde-gui",
                         "-h",
                         "string:desktop-entry:clamav-kde-gui",
                         "-a",
@@ -7445,6 +7452,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         app.setQuitOnLastWindowClosed(False)
     window = ClamAVMainWindow(auto_poll=auto_poll, initial_lang=lang)
     app.setApplicationName(window._tr("app_title"))
+    app.setWindowIcon(window.windowIcon())
     window._qt_app = app
     return window
 

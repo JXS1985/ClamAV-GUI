@@ -91,7 +91,7 @@ GenericName[de]=Virenscanner-Oberfläche
 Comment=Monitor and control ClamAV scans, quarantine, and virus signatures
 Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen überwachen und steuern
 Exec=/usr/bin/clamav-security-center
-Icon=security-high
+Icon=clamav-kde-gui
 Terminal=false
 Categories=System;Security;Qt;KDE;GNOME;
 StartupWMClass=clamav-kde-gui
@@ -129,12 +129,14 @@ build_deb() {
   install -d "${stage_dir}/usr/share/${PKG_NAME}"
   install -d "${stage_dir}/usr/bin"
   install -d "${stage_dir}/usr/share/applications"
+  install -d "${stage_dir}/usr/share/icons/hicolor/scalable/apps"
 
   install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${stage_dir}/usr/share/${PKG_NAME}/clamav_gui.py"
   install -m 0755 "${REPO_ROOT}/run.sh" "${stage_dir}/usr/share/${PKG_NAME}/run.sh"
   render_launcher_wrapper "${stage_dir}/usr/bin/${PKG_NAME}"
   ln -s "${PKG_NAME}" "${stage_dir}/usr/bin/clamav-kde-gui"
   render_desktop_file "${stage_dir}/usr/share/applications/clamav-kde-gui.desktop"
+  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${stage_dir}/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg"
 
   local installed_kb
   installed_kb="$(du -sk "${stage_dir}/usr" | awk '{print $1}')"
@@ -201,6 +203,7 @@ build_rpm() {
   install -m 0755 "${REPO_ROOT}/run.sh" "${src_dir}/run.sh"
   render_launcher_wrapper "${src_dir}/packaging/${PKG_NAME}"
   render_desktop_file "${src_dir}/packaging/clamav-kde-gui.desktop"
+  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${src_dir}/packaging/clamav-kde-gui.svg"
 
   src_tar="${rpm_top}/SOURCES/${PKG_NAME}-${rpm_ver}.tar.gz"
   tar -C "${rpm_top}/src_stage" -czf "${src_tar}" "${PKG_NAME}-${rpm_ver}"
@@ -234,11 +237,13 @@ python3 -m py_compile clamav_gui.py
 install -d -m 0755 %{buildroot}%{_datadir}/%{name}
 install -d -m 0755 %{buildroot}%{_bindir}
 install -d -m 0755 %{buildroot}%{_datadir}/applications
+install -d -m 0755 %{buildroot}%{_datadir}/icons/hicolor/scalable/apps
 install -m 0755 clamav_gui.py %{buildroot}%{_datadir}/%{name}/clamav_gui.py
 install -m 0755 run.sh %{buildroot}%{_datadir}/%{name}/run.sh
 install -m 0755 packaging/${PKG_NAME} %{buildroot}%{_bindir}/${PKG_NAME}
 ln -s ${PKG_NAME} %{buildroot}%{_bindir}/clamav-kde-gui
 install -m 0644 packaging/clamav-kde-gui.desktop %{buildroot}%{_datadir}/applications/clamav-kde-gui.desktop
+install -m 0644 packaging/clamav-kde-gui.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/clamav-kde-gui.svg
 
 %files
 %dir %{_datadir}/%{name}
@@ -247,6 +252,7 @@ install -m 0644 packaging/clamav-kde-gui.desktop %{buildroot}%{_datadir}/applica
 %{_bindir}/${PKG_NAME}
 %{_bindir}/clamav-kde-gui
 %{_datadir}/applications/clamav-kde-gui.desktop
+%{_datadir}/icons/hicolor/scalable/apps/clamav-kde-gui.svg
 
 %changelog
 * $(LC_ALL=C date +"%a %b %d %Y") Maintainer <noreply@localhost> - ${rpm_ver}-${rpm_rel}

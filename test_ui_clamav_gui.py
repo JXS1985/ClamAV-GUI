@@ -909,7 +909,9 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             self.win._force_quit = True
             self.win._tray_icon = None
 
-            # _notify fallback via notify-send sets desktop-entry hint for notification panel linking
+            # _notify fallback via notify-send sets desktop-entry hint & custom shield icon
+            self.assertFalse(self.win.windowIcon().isNull())
+            self.assertGreater(len(self.win.windowIcon().availableSizes()), 1)
             with mock.patch("shutil.which", return_value="/usr/bin/notify-send"), mock.patch(
                 "subprocess.Popen"
             ) as mock_notify_proc:
@@ -918,7 +920,7 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             notify_cmd = mock_notify_proc.call_args[0][0]
             self.assertEqual(notify_cmd[0], "notify-send")
             self.assertIn("string:desktop-entry:clamav-kde-gui", notify_cmd)
-            self.assertIn("security-high", notify_cmd)
+            self.assertIn("clamav-kde-gui", notify_cmd)
 
 
 class TestUIGNOMECompatibility(unittest.TestCase, _UIEnvMixin):

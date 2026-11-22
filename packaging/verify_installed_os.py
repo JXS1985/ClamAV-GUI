@@ -20,11 +20,12 @@ INSTALLED_APP_DIR = Path("/usr/share/clamav-security-center")
 INSTALLED_PY = INSTALLED_APP_DIR / "clamav_gui.py"
 INSTALLED_RUN = INSTALLED_APP_DIR / "run.sh"
 INSTALLED_DESKTOP = Path("/usr/share/applications/clamav-kde-gui.desktop")
+INSTALLED_ICON = Path("/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg")
 
 
 def verify_package_files(pkg_type: str) -> None:
     print("[os-verify] Checking installed package files...")
-    for p in (INSTALLED_BIN, INSTALLED_ALIAS, INSTALLED_PY, INSTALLED_RUN, INSTALLED_DESKTOP):
+    for p in (INSTALLED_BIN, INSTALLED_ALIAS, INSTALLED_PY, INSTALLED_RUN, INSTALLED_DESKTOP, INSTALLED_ICON):
         assert p.exists(), f"Missing installed path: {p}"
     for p in (INSTALLED_BIN, INSTALLED_PY, INSTALLED_RUN):
         assert os.access(p, os.X_OK), f"Expected executable permissions on {p}"
@@ -70,7 +71,7 @@ def verify_start_menu_entry(desktop: str) -> None:
     assert exec_bin == str(INSTALLED_BIN) and os.access(exec_bin, os.X_OK), f"Invalid Exec target: {exec_bin}"
     cats = set(filter(None, entry.get("Categories", "").split(";")))
     assert {"System", "Security", "KDE", "GNOME"}.issubset(cats), f"Missing expected categories: {cats}"
-    assert entry.get("Icon") == "security-high"
+    assert entry.get("Icon") == "clamav-kde-gui"
 
     # Optional Gio.DesktopAppInfo lookup (matches GNOME / XDG launcher visibility)
     try:
@@ -146,7 +147,7 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
                     win._notify("ClamAV OS Test", "Notification test")
                 cmd = mock_popen.call_args[0][0]
                 assert "string:desktop-entry:clamav-kde-gui" in cmd, cmd
-                assert "security-high" in cmd, cmd
+                assert "clamav-kde-gui" in cmd, cmd
     finally:
         win._force_quit = True
         if win._tray_icon is not None:
@@ -180,7 +181,7 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
                     [
                         "notify-send",
                         "-i",
-                        "security-high",
+                        "clamav-kde-gui",
                         "-h",
                         "string:desktop-entry:clamav-kde-gui",
                         "-a",
