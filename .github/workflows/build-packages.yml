@@ -17,8 +17,10 @@ on:
 
 jobs:
   build-deb:
-    name: Build DEB (Kubuntu 26.04)
-    runs-on: kubuntu-26.04-kde
+    name: Build DEB (Ubuntu / Kubuntu 26.04)
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/ubuntu:26.04
     env:
       PKG_VERSION: ${{ inputs.version }}
       PKG_RELEASE: ${{ inputs.release || '1' }}
@@ -62,33 +64,35 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - runner: opensuse-16-kde
+          - image: registry.opensuse.org/opensuse/leap:16.0
             name: openSUSE Leap 16
             pkg_mgr: zypper
             flavor: opensuse
             dist_tag: lp160
-          - runner: opensuse-16.1-kde
+          - image: registry.opensuse.org/opensuse/leap:16.1
             name: openSUSE Leap 16.1
             pkg_mgr: zypper
             flavor: opensuse
             dist_tag: lp161
-          - runner: opensuse-tumbleweed-kde
+          - image: docker.io/opensuse/tumbleweed:latest
             name: openSUSE Tumbleweed
             pkg_mgr: zypper
             flavor: opensuse
             dist_tag: tw
-          - runner: rocky-10-kde
+          - image: docker.io/rockylinux/rockylinux:10
             name: Rocky Linux 10
             pkg_mgr: dnf
             flavor: rocky
             dist_tag: el10
-          - runner: fedora-45-kde
+          - image: registry.fedoraproject.org/fedora:45
             name: Fedora 45
             pkg_mgr: dnf
             flavor: fedora
             dist_tag: fc45
 
-    runs-on: ${{ matrix.target.runner }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.target.image }}
     env:
       PKG_VERSION: ${{ inputs.version }}
       PKG_RELEASE: ${{ inputs.release || '1' }}

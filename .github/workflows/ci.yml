@@ -14,42 +14,49 @@ jobs:
         distro:
           - id: opensuse-16
             name: openSUSE Leap 16
+            image: registry.opensuse.org/opensuse/leap:16.0
             pkg_mgr: zypper
             pkg_type: rpm
             rpm_flavor: opensuse
             dist_tag: lp160
           - id: opensuse-16.1
             name: openSUSE Leap 16.1
+            image: registry.opensuse.org/opensuse/leap:16.1
             pkg_mgr: zypper
             pkg_type: rpm
             rpm_flavor: opensuse
             dist_tag: lp161
           - id: opensuse-tumbleweed
             name: openSUSE Tumbleweed
+            image: docker.io/opensuse/tumbleweed:latest
             pkg_mgr: zypper
             pkg_type: rpm
             rpm_flavor: opensuse
             dist_tag: tw
           - id: rocky-10
             name: Rocky Linux 10
+            image: docker.io/rockylinux/rockylinux:10
             pkg_mgr: dnf
             pkg_type: rpm
             rpm_flavor: rocky
             dist_tag: el10
           - id: fedora-45
             name: Fedora 45
+            image: registry.fedoraproject.org/fedora:45
             pkg_mgr: dnf
             pkg_type: rpm
             rpm_flavor: fedora
             dist_tag: fc45
           - id: ubuntu-26.04
             name: Ubuntu 26.04
+            image: docker.io/library/ubuntu:26.04
             pkg_mgr: apt
             pkg_type: deb
             rpm_flavor: none
             dist_tag: ubuntu2604
           - id: kubuntu-26.04
             name: Kubuntu 26.04
+            image: docker.io/library/ubuntu:26.04
             pkg_mgr: apt
             pkg_type: deb
             rpm_flavor: none
@@ -62,6 +69,7 @@ jobs:
           - distro:
               id: ubuntu-26.04
               name: Ubuntu 26.04
+              image: docker.io/library/ubuntu:26.04
               pkg_mgr: apt
               pkg_type: deb
               rpm_flavor: none
@@ -70,18 +78,19 @@ jobs:
           - distro:
               id: kubuntu-26.04
               name: Kubuntu 26.04
+              image: docker.io/library/ubuntu:26.04
               pkg_mgr: apt
               pkg_type: deb
               rpm_flavor: none
               dist_tag: kubuntu2604
             desktop: gnome
 
-    # Active Gitea act_runner targets (opensuse-16, opensuse-16.1, opensuse-tumbleweed,
-    # rocky-10, fedora-45 on kde & gnome; ubuntu-26.04 on gnome; kubuntu-26.04 on kde):
-    #   opensuse-16-kde, opensuse-16-gnome, opensuse-16.1-kde, opensuse-16.1-gnome,
-    #   opensuse-tumbleweed-kde, opensuse-tumbleweed-gnome, rocky-10-kde, rocky-10-gnome,
-    #   fedora-45-kde, fedora-45-gnome, ubuntu-26.04-gnome, kubuntu-26.04-kde
-    runs-on: ${{ matrix.distro.id }}-${{ matrix.desktop }}
+    # GitHub-hosted Ubuntu runners executing each target distro in its container image
+    # (opensuse-16, opensuse-16.1, opensuse-tumbleweed, rocky-10, fedora-45 on kde & gnome;
+    # ubuntu-26.04 on gnome; kubuntu-26.04 on kde).
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.distro.image }}
 
     env:
       PYTHONDONTWRITEBYTECODE: "1"
@@ -151,7 +160,7 @@ jobs:
             apt)
               ${SUDO} apt-get update
               DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
-                python3 python3-pip clamav clamav-freshclam findutils util-linux polkitd \
+                ca-certificates python3 python3-pip clamav clamav-freshclam findutils util-linux polkitd \
                 libnotify-bin dpkg-dev desktop-file-utils libglib2.0-bin xvfb \
                 libxkbcommon-x11-0 libegl1 libgl1 libdbus-1-3 || true
               DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y --no-install-recommends \
