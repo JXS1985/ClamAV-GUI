@@ -19,8 +19,8 @@ INSTALLED_ALIAS = Path("/usr/bin/clamav-kde-gui")
 INSTALLED_APP_DIR = Path("/usr/share/clamav-security-center")
 INSTALLED_PY = INSTALLED_APP_DIR / "clamav_gui.py"
 INSTALLED_RUN = INSTALLED_APP_DIR / "run.sh"
-INSTALLED_DESKTOP = Path("/usr/share/applications/clamav-kde-gui.desktop")
-INSTALLED_ICON = Path("/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg")
+INSTALLED_DESKTOP = Path("/usr/share/applications/clamav-security-center.desktop")
+INSTALLED_ICON = Path("/usr/share/icons/hicolor/scalable/apps/clamav-security-center.svg")
 
 
 def verify_package_files(pkg_type: str) -> None:
@@ -74,8 +74,8 @@ def verify_start_menu_entry(desktop: str) -> None:
     exec_bin = entry.get("Exec", "").split()[0]
     assert exec_bin == str(INSTALLED_BIN) and os.access(exec_bin, os.X_OK), f"Invalid Exec target: {exec_bin}"
     cats = set(filter(None, entry.get("Categories", "").split(";")))
-    assert {"System", "Security", "KDE", "GNOME"}.issubset(cats), f"Missing expected categories: {cats}"
-    assert entry.get("Icon") == "clamav-kde-gui"
+    assert {"System", "Security"}.issubset(cats), f"Missing expected categories: {cats}"
+    assert entry.get("Icon") == INSTALLED_ICON.stem
 
     # Optional Gio.DesktopAppInfo lookup (matches GNOME / XDG launcher visibility)
     try:
@@ -115,8 +115,8 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
 
     win = mod.create_main_window(auto_poll=False, lang="en")
     try:
-        assert win._qt_app.desktopFileName() == "clamav-kde-gui", (
-            f"Expected desktopFileName='clamav-kde-gui', got {win._qt_app.desktopFileName()!r}"
+        assert win._qt_app.desktopFileName() == INSTALLED_DESKTOP.stem, (
+            f"Expected desktopFileName={INSTALLED_DESKTOP.stem!r}, got {win._qt_app.desktopFileName()!r}"
         )
 
         # Verify tray setup constructs icon, tooltip, and full context menu
@@ -150,8 +150,8 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
                 ), mock.patch("subprocess.Popen") as mock_popen:
                     win._notify("ClamAV OS Test", "Notification test")
                 cmd = mock_popen.call_args[0][0]
-                assert "string:desktop-entry:clamav-kde-gui" in cmd, cmd
-                assert "clamav-kde-gui" in cmd, cmd
+                assert f"string:desktop-entry:{INSTALLED_DESKTOP.stem}" in cmd, cmd
+                assert INSTALLED_ICON.stem in cmd, cmd
     finally:
         win._force_quit = True
         if win._tray_icon is not None:
@@ -185,9 +185,9 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
                     [
                         "notify-send",
                         "-i",
-                        "clamav-kde-gui",
+                        INSTALLED_ICON.stem,
                         "-h",
-                        "string:desktop-entry:clamav-kde-gui",
+                        f"string:desktop-entry:{INSTALLED_DESKTOP.stem}",
                         "-a",
                         "ClamAV Security Center",
                         "ClamAV CI Notification Test",

@@ -1,0 +1,1 @@
+"""ClamAV Security Center tests."""

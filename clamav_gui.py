@@ -2891,7 +2891,8 @@ def _discover_windows_clamscan_processes() -> list[dict[str, Any]]:
         res = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH", "/FI", "IMAGENAME eq clamscan.exe"],
             capture_output=True,
-            text=True,
+            encoding="oem",
+            errors="replace",
             timeout=3,
             check=False,
             creationflags=_SUBPROCESS_NO_WINDOW,
@@ -5473,6 +5474,9 @@ def run_self_test() -> int:
     finally:
         helper_proc.terminate()
         helper_proc.wait(timeout=3)
+        for pipe in (helper_proc.stdin, helper_proc.stdout, helper_proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
     print("[self-test] ALL CHECKS PASSED.")
     return 0
@@ -6466,6 +6470,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.value_lbl.setStyleSheet(f"color: {color};")
             else:
                 self.value_lbl.setStyleSheet("" if self._dark else "color: #111827;")
+            self.value_lbl.setMinimumHeight(self.value_lbl.heightForWidth(max(1, self.value_lbl.width())))
 
     class FileOrFolderPickerDialog(QFileDialog):
         """File browser allowing immediate selection of either files or folders."""
@@ -6764,9 +6769,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                         "-u",
                         urgency,
                         "-i",
-                        "clamav-kde-gui",
+                        "clamav-security-center",
                         "-h",
-                        "string:desktop-entry:clamav-kde-gui",
+                        "string:desktop-entry:clamav-security-center",
                         "-a",
                         self._tr("app_title"),
                         title,
@@ -9381,7 +9386,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv[:1])
-        app.setDesktopFileName("clamav-kde-gui")
+        app.setDesktopFileName("clamav-security-center")
         app.setQuitOnLastWindowClosed(False)
     window = ClamAVMainWindow(auto_poll=auto_poll, initial_lang=lang)
     app.setApplicationName(window._tr("app_title"))
@@ -9398,7 +9403,7 @@ def launch_gui(lang: str | None = None) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="ClamAV KDE/Qt6 GUI Controller")
+    parser = argparse.ArgumentParser(description="ClamAV Security Center")
     parser.add_argument("--helper", action="store_true", help="Run internal root JSON helper")
     parser.add_argument("--self-test", action="store_true", help="Run automated diagnostics")
     parser.add_argument(

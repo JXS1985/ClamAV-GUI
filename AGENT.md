@@ -6,10 +6,10 @@ You are working on **ClamAV Security Center**, a Python 3 / Qt6 (`PySide6` with 
 - **Always commit changes directly to the `main` branch.**
 - **Before every commit to `main`**, run the full test and diagnostic suite cleanly:
   ```bash
-  QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s . -p "test_*.py" -v
+  QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v
   QT_QPA_PLATFORM=offscreen python3 clamav_gui.py --self-test
-  python3 -m py_compile clamav_gui.py test_clamav_gui.py test_ui_clamav_gui.py packaging/verify_installed_os.py
-  bash -n run.sh packaging/build_packages.sh
+  python3 -m compileall -q clamav_gui.py tests packaging/verify_installed_os.py
+  bash -n run.sh && bash -n packaging/build_packages.sh && bash -n packaging/PKGBUILD
   ```
 
 ---
@@ -25,10 +25,10 @@ All code crossing the unprivileged UI and privileged root `--helper` boundary mu
 
 ### 2. Testing, Desktop & Localization Requirements (Mandatory for New Features)
 Write and update tests concurrently with every feature, bug fix, or security change:
-- **Backend & Security Boundaries (`test_clamav_gui.py`):** Test success paths, input validation failures, symlink/path confinement, `--helper` JSON protocol, `/proc` discovery/termination, and `systemd` schedule generation.
-- **Headless Qt6 UI Tests (`test_ui_clamav_gui.py`):** Test user and admin flows cleanly under `QT_QPA_PLATFORM=offscreen`, including KDE Plasma & GNOME (`TestUIGNOMECompatibility`) behaviors, job start/pause/cancel reset, and schedule state sync.
+- **Backend & Security Boundaries (`tests/test_clamav_gui.py`):** Test success paths, input validation failures, symlink/path confinement, `--helper` JSON protocol, `/proc` discovery/termination, and `systemd` schedule generation.
+- **Headless Qt6 UI Tests (`tests/test_ui_clamav_gui.py`):** Test user and admin flows cleanly under `QT_QPA_PLATFORM=offscreen`, including KDE Plasma & GNOME (`TestUIGNOMECompatibility`) behaviors, job start/pause/cancel reset, and schedule state sync.
 - **Isolate Host & Container State:** Use `tempfile.TemporaryDirectory()` and explicit mocks (`os.geteuid`, `subprocess`, `discover_clamscan_processes`) so tests run instantaneously, deterministically, and offline both locally (`uid != 0`) and inside root CI containers (`uid == 0`).
-- **8-Language & Desktop Parity:** Maintain full key and placeholder parity in `TRANSLATIONS` across all 8 OS-detected locales (`en`, `de`, `es`, `fr`, `pt`, `zh`, `ja`, `ru`) with zero text overflow, keep vector shield/icon assets (`packaging/clamav-kde-gui.svg`) and `.desktop` entries (`desktop-file-validate clamav-kde-gui.desktop`) valid across KDE & GNOME, and validate `.deb`/`.rpm` packaging (`packaging/build_packages.sh`, `packaging/verify_installed_os.py`).
+- **8-Language & Desktop Parity:** Maintain full key and placeholder parity in `TRANSLATIONS` across all 8 OS-detected locales (`en`, `de`, `es`, `fr`, `pt`, `zh`, `ja`, `ru`) with zero text overflow, keep vector shield/icon assets (`packaging/clamav-security-center.svg`) and `.desktop` entries (`desktop-file-validate clamav-security-center.desktop`) valid across KDE & GNOME, and validate `.deb`/`.rpm` packaging (`packaging/build_packages.sh`, `packaging/verify_installed_os.py`).
 
 ### 3. The Principle of Least Churn (Token & Regression Control)
 - Treat existing code as a stable foundation. Do not refactor, rewrite, or style-optimize unrelated code unless a change strictly requires it.

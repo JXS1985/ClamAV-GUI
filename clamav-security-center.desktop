@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ClamAV Security Center
+Name[de]=ClamAV Sicherheitszentrum
+GenericName=Antivirus Scanner
+GenericName[de]=Virenscanner
+Comment=Monitor and control ClamAV scans, quarantine, and virus signatures
+Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen überwachen und steuern
+Exec=/usr/bin/clamav-security-center
+Icon=clamav-security-center
+Terminal=false
+Categories=System;Security;Qt;
+StartupWMClass=clamav-security-center

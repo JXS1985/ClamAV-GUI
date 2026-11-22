@@ -82,23 +82,7 @@ OUT_DIR="$(cd -- "${OUT_DIR}" && pwd)"
 
 render_desktop_file() {
   local dest="$1"
-  cat > "${dest}" <<'EOF'
-[Desktop Entry]
-Type=Application
-Version=1.0
-Name=ClamAV Security Center
-Name[de]=ClamAV Sicherheitszentrum
-GenericName=Antivirus Scanner GUI
-GenericName[de]=Virenscanner-Oberfläche
-Comment=Monitor and control ClamAV scans, quarantine, and virus signatures
-Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen überwachen und steuern
-Exec=/usr/bin/clamav-security-center
-Icon=clamav-kde-gui
-Terminal=false
-Categories=System;Security;Qt;GTK;KDE;GNOME;
-StartupWMClass=clamav-kde-gui
-EOF
-  chmod 0644 "${dest}"
+  install -m 0644 "${REPO_ROOT}/${PKG_NAME}.desktop" "${dest}"
   if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "${dest}"
   fi
@@ -125,8 +109,8 @@ stage_usr_payload() {
   install -m 0755 "${REPO_ROOT}/run.sh" "${stage_dir}/usr/share/${PKG_NAME}/run.sh"
   render_launcher_wrapper "${stage_dir}/usr/bin/${PKG_NAME}"
   ln -s "${PKG_NAME}" "${stage_dir}/usr/bin/clamav-kde-gui"
-  render_desktop_file "${stage_dir}/usr/share/applications/clamav-kde-gui.desktop"
-  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${stage_dir}/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg"
+  render_desktop_file "${stage_dir}/usr/share/applications/${PKG_NAME}.desktop"
+  install -m 0644 "${SCRIPT_DIR}/${PKG_NAME}.svg" "${stage_dir}/usr/share/icons/hicolor/scalable/apps/${PKG_NAME}.svg"
 }
 
 build_deb() {
@@ -222,8 +206,8 @@ build_rpm() {
   install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${src_dir}/clamav_gui.py"
   install -m 0755 "${REPO_ROOT}/run.sh" "${src_dir}/run.sh"
   render_launcher_wrapper "${src_dir}/packaging/${PKG_NAME}"
-  render_desktop_file "${src_dir}/packaging/clamav-kde-gui.desktop"
-  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${src_dir}/packaging/clamav-kde-gui.svg"
+  render_desktop_file "${src_dir}/packaging/${PKG_NAME}.desktop"
+  install -m 0644 "${SCRIPT_DIR}/${PKG_NAME}.svg" "${src_dir}/packaging/${PKG_NAME}.svg"
 
   src_tar="${rpm_top}/SOURCES/${PKG_NAME}-${rpm_ver}.tar.gz"
   tar -C "${rpm_top}/src_stage" -czf "${src_tar}" "${PKG_NAME}-${rpm_ver}"
@@ -262,8 +246,8 @@ install -m 0755 clamav_gui.py %{buildroot}%{_datadir}/%{name}/clamav_gui.py
 install -m 0755 run.sh %{buildroot}%{_datadir}/%{name}/run.sh
 install -m 0755 packaging/${PKG_NAME} %{buildroot}%{_bindir}/${PKG_NAME}
 ln -s ${PKG_NAME} %{buildroot}%{_bindir}/clamav-kde-gui
-install -m 0644 packaging/clamav-kde-gui.desktop %{buildroot}%{_datadir}/applications/clamav-kde-gui.desktop
-install -m 0644 packaging/clamav-kde-gui.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/clamav-kde-gui.svg
+install -m 0644 packaging/${PKG_NAME}.desktop %{buildroot}%{_datadir}/applications/${PKG_NAME}.desktop
+install -m 0644 packaging/${PKG_NAME}.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/${PKG_NAME}.svg
 
 %files
 %dir %{_datadir}/%{name}
@@ -271,8 +255,8 @@ install -m 0644 packaging/clamav-kde-gui.svg %{buildroot}%{_datadir}/icons/hicol
 %{_datadir}/%{name}/run.sh
 %{_bindir}/${PKG_NAME}
 %{_bindir}/clamav-kde-gui
-%{_datadir}/applications/clamav-kde-gui.desktop
-%{_datadir}/icons/hicolor/scalable/apps/clamav-kde-gui.svg
+%{_datadir}/applications/${PKG_NAME}.desktop
+%{_datadir}/icons/hicolor/scalable/apps/${PKG_NAME}.svg
 
 %post
 if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -d /usr/share/icons/hicolor ]; then

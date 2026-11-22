@@ -18,7 +18,7 @@ from unittest import mock
 # Ensure Qt stays headless if anything instantiates QApplication during backend tests
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import clamav_gui as app_mod  # noqa: E402
 
 
@@ -121,8 +121,10 @@ class TestFormattingAndParsers(unittest.TestCase):
         self.assertIn("/sys", parsed["exclude_dirs"])
         self.assertIn("/mnt/backup", parsed["exclude_dirs"])
 
-        # Default target "/" and `--` end-of-options separator
-        self.assertEqual(app_mod.parse_scan_targets_and_limits(["clamscan", "-r"])["targets"], ["/"])
+        # Platform default target and `--` end-of-options separator
+        self.assertEqual(
+            app_mod.parse_scan_targets_and_limits(["clamscan", "-r"])["targets"], [app_mod._system_root_target()]
+        )
         self.assertEqual(
             app_mod.parse_scan_targets_and_limits(["clamscan", "-r", "--", "/dir-with-dash"])["targets"],
             ["/dir-with-dash"],
@@ -1083,7 +1085,7 @@ class TestSecurityHardening(unittest.TestCase):
                 app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
         # packaging/verify_installed_os.py checks on temporary staged files
-        sys.path.insert(0, str(Path(__file__).resolve().parent / "packaging"))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packaging"))
         import verify_installed_os as vos  # type: ignore[import-not-found]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1096,13 +1098,13 @@ class TestSecurityHardening(unittest.TestCase):
             fake_run = root / "run.sh"
             fake_run.write_text("#!/bin/sh\n", encoding="utf-8")
             fake_run.chmod(0o755)
-            fake_desk = root / "clamav-kde-gui.desktop"
+            fake_desk = root / "clamav-security-center.desktop"
             fake_desk.write_text(
                 f"[Desktop Entry]\nType=Application\nName=ClamAV Security Center\nName[de]=ClamAV Sicherheitszentrum\n"
-                f"Exec={fake_bin}\nIcon=clamav-kde-gui\nCategories=System;Security;Qt;KDE;GNOME;\n",
+                f"Exec={fake_bin}\nIcon=clamav-security-center\nCategories=System;Security;Qt;\n",
                 encoding="utf-8",
             )
-            fake_icon = root / "clamav-kde-gui.svg"
+            fake_icon = root / "clamav-security-center.svg"
             fake_icon.write_text("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'/>", encoding="utf-8")
             with (
                 mock.patch.object(vos, "INSTALLED_BIN", fake_bin),
@@ -1523,6 +1525,7 @@ class TestWindowsCompatibility(unittest.TestCase):
                 app_mod.WINDOWS_SCHEDULE_CONFIG_PATH = orig_cfg
                 app_mod.DEFAULT_LOG_PATH = orig_log
 
+    @unittest.skipIf(app_mod._is_posix_root(), "The temporary fallback log is only used by unprivileged helpers")
     def test_frozen_self_test_fallback_temp_log(self) -> None:
         real_helper_cmd = [sys.executable, app_mod.SCRIPT_PATH, "--helper"]
         with (
@@ -1542,7 +1545,7 @@ class TestUserModeFallback(unittest.TestCase):
         fake_proc.poll.return_value = None
         client._proc = fake_proc
 
-        with mock.patch.object(app_mod, "IS_WINDOWS", False):
+        with mock.patch.object(app_mod, "IS_WINDOWS", False), mock.patch.object(app_mod, "IS_MACOS", False):
             client.uid = 1000
             self.assertTrue(client.is_connected)
             self.assertFalse(client.is_root)

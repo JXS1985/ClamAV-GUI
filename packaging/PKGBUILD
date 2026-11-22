@@ -45,23 +45,7 @@ EOF
   chmod 0755 "${pkgdir}/usr/bin/${pkgname}"
   ln -s "${pkgname}" "${pkgdir}/usr/bin/clamav-kde-gui"
 
-  cat > "${pkgdir}/usr/share/applications/clamav-kde-gui.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Version=1.0
-Name=ClamAV Security Center
-Name[de]=ClamAV Sicherheitszentrum
-GenericName=Antivirus Scanner GUI
-GenericName[de]=Virenscanner-Oberfläche
-Comment=Monitor and control ClamAV scans, quarantine, and virus signatures
-Comment[de]=ClamAV-Scans, Quarantäne und Virensignaturen überwachen und steuern
-Exec=/usr/bin/clamav-security-center
-Icon=clamav-kde-gui
-Terminal=false
-Categories=System;Security;Qt;GTK;KDE;GNOME;
-StartupWMClass=clamav-kde-gui
-EOF
-  chmod 0644 "${pkgdir}/usr/share/applications/clamav-kde-gui.desktop"
-  install -m 0644 "${srcdir_root}/packaging/clamav-kde-gui.svg" \
-    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg"
+  install -m 0644 "${srcdir_root}/${pkgname}.desktop" "${pkgdir}/usr/share/applications/${pkgname}.desktop"
+  install -m 0644 "${srcdir_root}/packaging/${pkgname}.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${pkgname}.svg"
 }

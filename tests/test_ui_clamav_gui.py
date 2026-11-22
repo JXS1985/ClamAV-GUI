@@ -17,7 +17,7 @@ from unittest import mock
 # Run all Qt GUI tests completely headlessly without touching the user desktop session
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import clamav_gui as app_mod  # noqa: E402
 
 try:
@@ -728,7 +728,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 ):
                     QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
                 mock_msg_exec.assert_not_called()
-                self.assertEqual(calls[0][1]["cmd_args"][-1], str(sub_dir))
+                self.assertEqual(Path(calls[0][1]["cmd_args"][-1]), sub_dir)
 
                 # 2. Highlight a file and click Open -> scans that file immediately; accept() on folder navigates into it
                 calls.clear()
@@ -737,7 +737,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                     _wait_and_select(dlg, "pick_folder")
                     dlg.accept()  # type: ignore[attr-defined]
                     self.win._qt_app.processEvents()
-                    self.assertEqual(dlg.directory().absolutePath(), str(sub_dir))  # type: ignore[attr-defined]
+                    self.assertEqual(Path(dlg.directory().absolutePath()), sub_dir)  # type: ignore[attr-defined]
 
                     _wait_and_select(dlg, "pick_file.txt")
                     dlg._open_btn.click()  # type: ignore[attr-defined]
@@ -749,10 +749,11 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 ):
                     QTest.mouseClick(self.win.btn_pick_scan, Qt.MouseButton.LeftButton)
                 mock_msg_exec.assert_not_called()
-                self.assertEqual(calls[0][1]["cmd_args"][-1], str(sample_file))
+                self.assertEqual(Path(calls[0][1]["cmd_args"][-1]), sample_file)
 
     @unittest.skipIf(sys.platform != "linux", "POSIX signal test")
-    def test_pause_stop_priority_and_restart_without_i(self) -> None:
+    @mock.patch.object(app_mod, "start_background_precount", return_value={})
+    def test_pause_stop_priority_and_restart_without_i(self, _precount: mock.Mock) -> None:
         own_proc = {
             "pid": 6161,
             "cmdline": ["clamscan", "-ri", "--log=/tmp/custom.log", "/home"],
@@ -1126,12 +1127,20 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
         self.win._copy_threat_path()
         self.assertEqual(QApplication.clipboard().text(), "/tmp/evil.bin")
 
-        # Reveal in Dolphin when on KDE
+        # Reveal in the native file manager.
         with mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE", "DESKTOP_SESSION": "plasma"}), mock.patch(
             "shutil.which", return_value="/usr/bin/dolphin"
         ), mock.patch("subprocess.Popen") as mock_p:
             self.win._reveal_threat_in_dolphin()
-            mock_p.assert_called_once_with(["dolphin", "--select", "/tmp/evil.bin"], start_new_session=True)
+            if app_mod.IS_WINDOWS:
+                mock_p.assert_called_once_with(
+                    ["explorer.exe", f"/select,{os.path.normpath('/tmp/evil.bin')}"],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            elif app_mod.IS_MACOS:
+                mock_p.assert_called_once_with(["open", "-R", "/tmp/evil.bin"], start_new_session=True)
+            else:
+                mock_p.assert_called_once_with(["dolphin", "--select", "/tmp/evil.bin"], start_new_session=True)
 
         # Quarantine Selected Threat & Delete Selected Threat
         with (
@@ -1187,8 +1196,9 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
             self.assertEqual(self.win.tabs.tabText(1), "Threats (0) && Quarantine (1)")
             self.win.quarantine_table.selectRow(0)
 
+            restore_dir = Path(self._tmp_dir.name) / "restored"
             with (
-                mock.patch.object(QFileDialog, "getExistingDirectory", return_value="/tmp/restored"),
+                mock.patch.object(QFileDialog, "getExistingDirectory", return_value=str(restore_dir)),
                 mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
                 mock.patch.object(QMessageBox, "information") as mock_info,
             ):
@@ -1198,7 +1208,7 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
             self.assertEqual(self.win.quarantine_group.title(), "Quarantine (0)")
             self.assertEqual(self.win.tabs.tabText(1), "Threats (0) && Quarantine (0)")
             restore_call = next(c for c in rpc_calls if c[0] == "restore_quarantine")
-            self.assertEqual(restore_call[1]["dest_path"], "/tmp/restored/bad.sh")
+            self.assertEqual(Path(restore_call[1]["dest_path"]), restore_dir / "bad.sh")
 
     def test_history_tab_merge_log_summaries_and_clear(self) -> None:
         self.win._open_tab(0)
@@ -1455,7 +1465,7 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             ):
                 self.win.dropEvent(ev_drop)
             mock_launch.assert_called_once()
-            self.assertEqual(mock_launch.call_args[0][0], [str(f1)])
+            self.assertEqual([Path(target) for target in mock_launch.call_args[0][0]], [f1])
             self.assertIn("suspect1.exe", mock_launch.call_args[1]["label"])
 
             # Dropping >5 files truncates preview with dlg_drop_more
@@ -1511,8 +1521,8 @@ class TestUIDragDropAndTrayBehavior(unittest.TestCase, _UIEnvMixin):
             mock_notify_proc.assert_called_once()
             notify_cmd = mock_notify_proc.call_args[0][0]
             self.assertEqual(notify_cmd[0], "notify-send")
-            self.assertIn("string:desktop-entry:clamav-kde-gui", notify_cmd)
-            self.assertIn("clamav-kde-gui", notify_cmd)
+            self.assertIn("string:desktop-entry:clamav-security-center", notify_cmd)
+            self.assertIn("clamav-security-center", notify_cmd)
 
 
 class TestUIGNOMECompatibility(unittest.TestCase, _UIEnvMixin):
@@ -1552,7 +1562,7 @@ class TestUIGNOMECompatibility(unittest.TestCase, _UIEnvMixin):
             cmd = mock_popen.call_args[0][0]
             self.assertEqual(cmd[0], "notify-send")
             self.assertIn("critical", cmd)
-            self.assertIn("string:desktop-entry:clamav-kde-gui", cmd)
+            self.assertIn("string:desktop-entry:clamav-security-center", cmd)
 
     @unittest.skipIf(sys.platform != "linux", "POSIX GNOME Nautilus reveal test")
     def test_gnome_threat_reveal_uses_nautilus_and_neutral_labels(self) -> None:
@@ -1794,18 +1804,96 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                             msg=f"Active button overflow in {expected_code}: {t!r}",
                         )
 
-                    # Grouped 4 tabs fit horizontally without cramping/truncation
+                    # Each tab remains visible when selected, including with a scrolling tab bar.
                     w._open_tab(0)
-                    w._qt_app.processEvents()
-                    self.assertLessEqual(
-                        w.tabs.tabBar().sizeHint().width(),
-                        w.tabs.width(),
-                        msg=f"Tab bar overflow in {expected_code}: {w.tabs.tabBar().sizeHint().width()} > {w.tabs.width()}",
-                    )
+                    tab_bar = w.tabs.tabBar()
+                    self.assertEqual(tab_bar.elideMode(), Qt.TextElideMode.ElideNone)
+                    for index in range(w.tabs.count()):
+                        w.tabs.setCurrentIndex(index)
+                        w._qt_app.processEvents()
+                        self.assertTrue(
+                            tab_bar.rect().contains(tab_bar.tabRect(index)),
+                            msg=f"Selected tab {index} is clipped in {expected_code}",
+                        )
                 finally:
                     w._force_quit = True
                     w.close()
                     w._qt_app.processEvents()
+
+
+@unittest.skipUnless(os.environ.get("CLAMAV_GUI_LIVE_TEST") == "1", "Requires a local ClamAV installation")
+class TestUILiveClamAV(unittest.TestCase, _UIEnvMixin):
+    """Exercise the native scanner, helper, and Qt threat workflow with an inert signature."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        app_mod._ensure_standard_path()
+        cls._setup_isolated_env()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._teardown_isolated_env()
+
+    def test_quick_scan_and_quarantine_round_trip(self) -> None:
+        self.assertFalse(app_mod._is_posix_root(), "Run this test as an unprivileged user")
+        root = Path(self._tmp_dir.name).resolve()
+        database = root / "database"
+        targets = root / "targets"
+        database.mkdir()
+        targets.mkdir()
+        payload = b"CLAMAV_GUI_CI_TEST_PAYLOAD"
+        signature = "ClamAV.GUI.CI.SmokeTest"
+        (database / "smoke.ndb").write_text(f"{signature}:0:*:{payload.hex()}\n", encoding="ascii")
+        clean = targets / "clean.txt"
+        clean.write_text("clean file", encoding="utf-8")
+        sample = targets / "sample.bin"
+        sample.write_bytes(payload)
+        log_path = root / "scan.log"
+
+        with (
+            mock.patch.object(app_mod, "_default_db_dir", return_value=str(database)),
+            mock.patch.object(app_mod, "get_quick_scan_targets", return_value=[str(targets)]),
+            mock.patch.object(app_mod, "DEFAULT_LOG_PATH", str(log_path)),
+            mock.patch.object(self.win, "_notify"),
+            mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+            mock.patch.object(QMessageBox, "information"),
+            mock.patch.object(QMessageBox, "warning") as warning,
+        ):
+            metadata = app_mod.get_clamav_metadata()
+            self.assertTrue(metadata["has_clamscan"] and metadata["has_freshclam"], metadata)
+            self.assertIn("ClamAV", metadata["version"])
+            ok, message = self.win.helper.start_local()
+            self.assertTrue(ok, message)
+            self.win._last_meta = metadata
+            self.win._update_controls_enabled()
+            QTest.mouseClick(self.win.btn_quick_scan, Qt.MouseButton.LeftButton)
+            warning.assert_not_called()
+            deadline = time.monotonic() + 30
+            log_text = ""
+            while time.monotonic() < deadline:
+                self.win._poll_tick()
+                QTest.qWait(50)
+                if log_path.exists():
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                if "SCAN SUMMARY" in log_text and self.win.threats_table.rowCount() and not self.win._inspect_inflight:
+                    break
+
+            summaries = app_mod.parse_scan_summaries_from_log(log_text)
+            self.assertEqual([entry["threats"] for entry in summaries], [1], log_text)
+            self.assertEqual(self.win.threats_table.rowCount(), 1, log_text)
+            self.assertEqual(Path(self.win.threats_table.item(0, 0).text()), sample)
+            self.assertIn(signature, self.win.threats_table.item(0, 1).text())
+            self.win.threats_table.selectRow(0)
+            self.win._quarantine_selected_threat()
+            warning.assert_not_called()
+            self.assertFalse(sample.exists())
+            self.assertEqual(self.win.quarantine_table.rowCount(), 1)
+            self.win.quarantine_table.selectRow(0)
+            self.win._restore_quarantine()
+            warning.assert_not_called()
+            self.assertEqual(sample.read_bytes(), payload)
+            self.assertTrue(clean.exists())
+            self.assertEqual(self.win.quarantine_table.rowCount(), 0)
 
 
 if __name__ == "__main__":

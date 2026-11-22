@@ -212,18 +212,20 @@ Use [`packaging/build_packages.sh`](packaging/build_packages.sh) (or [`packaging
 ./packaging/build_packages.sh --type arch --version 1.0.0 --release 1
 ```
 
-GitHub Actions CI (`.github/workflows/ci.yml`, manual `workflow_dispatch`, max 2 runners in parallel, `fail-fast`) tests across **Arch Linux (KDE & GNOME)**, **openSUSE Leap 16 / 16.1 / Tumbleweed**, **Rocky Linux 10**, **Fedora 45**, **Ubuntu 26.04 (GNOME)**, **Kubuntu 26.04 (KDE)**, **Windows** (including Chocolatey ClamAV, live `clamscan.exe`, and PyInstaller `.exe` `--self-test`), and **macOS** (including Homebrew ClamAV, live `clamscan`, and PyInstaller `--self-test`). `.github/workflows/build-packages.yml` (manual `workflow_dispatch`, max 2 runners in parallel) builds `.deb`, Arch `.pkg.tar.zst`, `.rpm`, Windows `.zip`, and macOS `.zip` packages.
+GitHub Actions CI (`.github/workflows/ci.yml`, manual `workflow_dispatch`, max 2 runners in parallel) runs the backend and headless Qt suites on **Arch Linux**, **openSUSE Leap 16 / 16.1 / Tumbleweed**, **Rocky Linux 10**, **Fedora 45**, **Ubuntu 26.04 (GNOME)**, **Kubuntu 26.04 (KDE)**, **Windows**, and **macOS**. The live UI test runs the native `clamscan` with a local test signature and checks detection, quarantine, and restore through the helper. Linux verifies the installed native package and desktop entry. Windows and macOS build and run the packaged `--self-test`. The manual packaging workflow (`.github/workflows/build-packages.yml`) builds `.deb`, Arch `.pkg.tar.zst`, `.rpm`, Windows `.zip`, and macOS `.zip` packages.
 
 ---
 
 ## Running Tests
 
 ```bash
-QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s . -p "test_*.py" -v
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -v
 QT_QPA_PLATFORM=offscreen python3 clamav_gui.py --self-test
-python3 -m py_compile clamav_gui.py test_clamav_gui.py test_ui_clamav_gui.py packaging/verify_installed_os.py
-bash -n run.sh packaging/build_packages.sh
+python3 -m compileall -q clamav_gui.py tests packaging/verify_installed_os.py
+bash -n run.sh && bash -n packaging/build_packages.sh && bash -n packaging/PKGBUILD
 ```
+
+Set `CLAMAV_GUI_LIVE_TEST=1` to include the live scan and quarantine test. Run it as a regular user with ClamAV installed. The test creates its own temporary signature database and sample files.
 
 ---
 

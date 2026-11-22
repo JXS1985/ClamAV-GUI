@@ -50,7 +50,7 @@ jobs:
             --version "${PKG_VERSION}" \
             --release "${PKG_RELEASE}" \
             --out-dir dist
-          (cd dist && sha256sum *.deb > SHA256SUMS.deb.txt)
+          (cd dist && sha256sum -- *.deb > SHA256SUMS.deb.txt)
           ls -lh dist/
 
       - name: Upload .deb package artifact
@@ -95,7 +95,7 @@ jobs:
             --version "${PKG_VERSION}" \
             --release "${PKG_RELEASE}" \
             --out-dir dist
-          (cd dist && sha256sum *.pkg.tar.zst > SHA256SUMS.arch.txt)
+          (cd dist && sha256sum -- *.pkg.tar.zst > SHA256SUMS.arch.txt)
           ls -lh dist/
 
       - name: Upload Arch package artifact
@@ -189,7 +189,7 @@ jobs:
             --version "${PKG_VERSION}" \
             --release "${PKG_RELEASE}" \
             --out-dir dist
-          (cd dist && sha256sum *.rpm > "SHA256SUMS.${DIST_TAG}.txt")
+          (cd dist && sha256sum -- *.rpm > "SHA256SUMS.${DIST_TAG}.txt")
           ls -lh dist/
 
       - name: Upload .rpm package artifact
@@ -229,7 +229,7 @@ jobs:
           from PySide6.QtSvg import QSvgRenderer
           from PIL import Image
           app = QGuiApplication([])
-          renderer = QSvgRenderer("packaging/clamav-kde-gui.svg")
+          renderer = QSvgRenderer("packaging/clamav-security-center.svg")
           img = QImage(QSize(256, 256), QImage.Format_ARGB32)
           img.fill(Qt.transparent)
           painter = QPainter(img)
@@ -245,10 +245,10 @@ jobs:
           if (Test-Path "build-win/app.ico") {
             $iconArgs = @("--icon", "build-win/app.ico")
           }
-          pyinstaller --noconfirm --clean --onefile --windowed `
+          pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early `
             --name clamav-security-center `
             @iconArgs `
-            --add-data "packaging/clamav-kde-gui.svg;packaging" `
+            --add-data "packaging/clamav-security-center.svg;packaging" `
             clamav_gui.py
 
           New-Item -ItemType Directory -Force -Path "build-win/stage" | Out-Null
@@ -290,7 +290,7 @@ jobs:
           export QT_QPA_PLATFORM=offscreen
           pyinstaller --noconfirm --clean --onefile --windowed \
             --name clamav-security-center \
-            --add-data "packaging/clamav-kde-gui.svg:packaging" \
+            --add-data "packaging/clamav-security-center.svg:packaging" \
             clamav_gui.py
 
           mkdir -p build-mac/stage release-mac
