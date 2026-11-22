@@ -422,20 +422,26 @@ jobs:
           }
 
   test-macos:
-    name: macOS (Python + PySide6)
+    name: macOS (Python + PySide6 + ClamAV)
     runs-on: macos-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install ClamAV via Homebrew
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install clamav
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install PySide6
-        run: python -m pip install --upgrade pip PySide6
+      - name: Install PySide6 and PyInstaller
+        run: python -m pip install --upgrade pip PySide6 pyinstaller
 
       - name: Compile-check Python modules
         run: python -m py_compile clamav_gui.py test_clamav_gui.py test_ui_clamav_gui.py
@@ -449,3 +455,89 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s . -p "test_*.py" -v
+
+      - name: Run live clamscan smoke test via HelperClient
+        run: |
+          python - <<'PY'
+          import tempfile
+          import time
+          from pathlib import Path
+          import clamav_gui
+
+          clamav_gui._ensure_standard_path()
+          deps = clamav_gui.check_system_dependencies()
+          assert deps["has_clamscan"], f"clamscan missing: {deps}"
+          assert deps["has_freshclam"], f"freshclam missing: {deps}"
+
+          meta = clamav_gui.get_clamav_metadata()
+          assert "ClamAV" in meta["version"], f"Unexpected version metadata: {meta}"
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              root = Path(tmpdir)
+              db_dir = root / "db"
+              target_dir = root / "targets"
+              db_dir.mkdir()
+              target_dir.mkdir()
+              (db_dir / "smoke.ndb").write_text(
+                  "ClamAV.MacOS.CI.SmokeTest:0:*:434c414d41565f4d41435f43495f544553545f5041594c4f4144\n",
+                  encoding="utf-8",
+              )
+              (target_dir / "clean.txt").write_text("hello world\n", encoding="utf-8")
+              (target_dir / "sample.bin").write_bytes(b"CLAMAV_MAC_CI_TEST_PAYLOAD")
+              log_path = root / "mac-smoke.log"
+
+              client = clamav_gui.HelperClient()
+              ok, msg = client.start_local()
+              assert ok and client.is_connected, f"Local helper failed: {msg}"
+              try:
+                  res = client.call(
+                      "start_scan",
+                      {
+                          "cmd_args": [
+                              "clamscan",
+                              "-r",
+                              f"--database={db_dir}",
+                              f"--log={log_path}",
+                              str(target_dir),
+                          ],
+                          "log_path": str(log_path),
+                      },
+                  )
+                  pid = int(res["pid"])
+                  deadline = time.monotonic() + 60.0
+                  log_text = ""
+                  while time.monotonic() < deadline:
+                      if log_path.exists():
+                          log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                      if (not clamav_gui._is_pid_running(pid)) and "SCAN SUMMARY" in log_text:
+                          break
+                      time.sleep(0.2)
+                  assert "SCAN SUMMARY" in log_text, f"Incomplete scan log:\n{log_text}"
+                  threats = clamav_gui.parse_threats_from_text(log_text)
+                  assert any(sig == "ClamAV.MacOS.CI.SmokeTest" for _, sig in threats), f"Missed signature: {threats}\n{log_text}"
+                  summaries = clamav_gui.parse_scan_summaries_from_log(log_text)
+                  assert len(summaries) >= 1 and summaries[-1]["threats"] == 1, f"Bad summary: {summaries}\n{log_text}"
+                  print(f"[mac-smoke] Live clamscan detected threat cleanly: {threats}")
+              finally:
+                  client.close()
+          PY
+
+      - name: Build and run packaged PyInstaller --self-test smoke test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed \
+            --name clamav-security-center \
+            --add-data "packaging/clamav-kde-gui.svg:packaging" \
+            clamav_gui.py
+          if [ -x "dist/clamav-security-center.app/Contents/MacOS/clamav-security-center" ]; then
+            BIN="dist/clamav-security-center.app/Contents/MacOS/clamav-security-center"
+          elif [ -x "dist/clamav-security-center" ]; then
+            BIN="dist/clamav-security-center"
+          else
+            echo "Built macOS binary not found under dist/" >&2
+            exit 1
+          fi
+          OUT="$("${BIN}" --self-test 2>&1)"
+          echo "${OUT}"
+          echo "${OUT}" | grep -q "ALL CHECKS PASSED"
