@@ -127,12 +127,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "archive_temp_suffix": "  (+{count} archive temp file)",
         "show_tabs_btn": "Show Logs, Quarantine && Settings ▾",
         "hide_tabs_btn": "Hide Logs, Quarantine && Settings ▴",
-        "tab_log": "Live Output & Log",
-        "tab_threats": "Detected Threats ({count})",
+        "tab_log": "Live Log",
+        "tab_threats": "Threats ({count})",
         "tab_quarantine": "Quarantine ({count})",
-        "tab_history": "Scan History",
-        "tab_schedule": "Automatic Scans",
-        "tab_custom": "Custom Scan (Advanced)",
+        "tab_history": "History",
+        "tab_schedule": "Schedule",
+        "tab_custom": "Custom Scan",
         "tab_db": "Virus Database",
         "log_path_lbl": "Log Path:",
         "reload_log_btn": "Reload Log",
@@ -400,12 +400,12 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "archive_temp_suffix": "  (+{count} temporäre Archivdatei)",
         "show_tabs_btn": "Protokolle, Quarantäne && Einstellungen anzeigen ▾",
         "hide_tabs_btn": "Protokolle, Quarantäne && Einstellungen ausblenden ▴",
-        "tab_log": "Live-Ausgabe & Protokoll",
-        "tab_threats": "Erkannte Bedrohungen ({count})",
+        "tab_log": "Live-Protokoll",
+        "tab_threats": "Bedrohungen ({count})",
         "tab_quarantine": "Quarantäne ({count})",
-        "tab_history": "Scan-Verlauf",
-        "tab_schedule": "Automatische Scans",
-        "tab_custom": "Benutzerdefinierter Scan (Erweitert)",
+        "tab_history": "Verlauf",
+        "tab_schedule": "Zeitplan",
+        "tab_custom": "Erweiterter Scan",
         "tab_db": "Virendatenbank",
         "log_path_lbl": "Protokollpfad:",
         "reload_log_btn": "Neu laden",
@@ -5401,7 +5401,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.hero_db_btn = self._reg_text(QPushButton(), "hero_update_db_btn")
             self.hero_db_btn.setIcon(_theme_icon("view-refresh"))
             self.hero_db_btn.setVisible(False)
-            self.hero_db_btn.clicked.connect(lambda: self._open_tab(6))
+            self.hero_db_btn.clicked.connect(lambda: self._open_tab(3))
             hero_outer.addWidget(self.hero_db_btn)
             root.addWidget(self.hero_banner)
 
@@ -5562,30 +5562,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             tabs_toggle_row.addStretch(1)
             root.addLayout(tabs_toggle_row)
 
-            # Main Tabs (hidden until requested)
+            # Main Tabs (hidden until requested; consolidated into 4 clear tabs)
             self.tabs = QTabWidget()
             self.tabs.setUsesScrollButtons(True)
-            self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+            self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
+            log_hist_page = self._build_log_and_history_tab()
+            threats_quar_page = self._build_threats_and_quarantine_tab()
+            sched_custom_page = self._build_schedule_and_custom_tab()
+            db_page = self._build_db_tab()
             tab_specs = (
-                (self._build_log_tab(), _theme_icon("text-x-log", "text-x-generic", "document-properties"), self._tr("tab_log")),
-                (
-                    self._build_threats_tab(),
-                    _theme_icon("security-low", "security-medium", "dialog-warning"),
-                    self._tr("tab_threats", count=0),
-                ),
-                (
-                    self._build_quarantine_tab(),
-                    _theme_icon("folder-locked", "changes-prevent", "system-lock-screen", "folder"),
-                    self._tr("tab_quarantine", count=0),
-                ),
-                (self._build_history_tab(), _theme_icon("document-open-recent", "document-open"), self._tr("tab_history")),
-                (self._build_schedule_tab(), _theme_icon("appointment-new", "x-office-calendar"), self._tr("tab_schedule")),
-                (
-                    self._build_new_scan_tab(),
-                    _theme_icon("configure", "preferences-system", "applications-system"),
-                    self._tr("tab_custom"),
-                ),
-                (self._build_db_tab(), _theme_icon("view-refresh"), self._tr("tab_db")),
+                (log_hist_page, _theme_icon("text-x-log", "text-x-generic", "document-properties"), self._tab_label_log_history()),
+                (threats_quar_page, _theme_icon("security-low", "security-medium", "dialog-warning"), self._tab_label_threats_quarantine()),
+                (sched_custom_page, _theme_icon("appointment-new", "x-office-calendar"), self._tab_label_schedule_custom()),
+                (db_page, _theme_icon("view-refresh"), self._tr("tab_db")),
             )
             for tab_page, tab_icon, tab_label in tab_specs:
                 scroll = QScrollArea()
@@ -5623,6 +5612,79 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.toggle_tabs_btn.setChecked(True)
                 self._on_toggle_tabs_panel(True)
             self.tabs.setCurrentIndex(index)
+
+        def _tab_label_log_history(self) -> str:
+            return f"{self._tr('tab_log')} && {self._tr('tab_history')}"
+
+        def _tab_label_threats_quarantine(self) -> str:
+            t_cnt = self.threats_table.rowCount() if hasattr(self, "threats_table") else 0
+            return f"{self._tr('tab_threats', count=t_cnt)} && {self._tr('tab_quarantine', count=self._quarantine_count)}"
+
+        def _tab_label_schedule_custom(self) -> str:
+            return f"{self._tr('tab_schedule')} && {self._tr('tab_custom')}"
+
+        def _build_log_and_history_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setSpacing(12)
+
+            self.log_group = self._reg_title(QGroupBox(), "tab_log")
+            log_inner = QVBoxLayout(self.log_group)
+            log_inner.setContentsMargins(8, 8, 8, 8)
+            log_widget = self._build_log_tab()
+            self.log_view.setMinimumHeight(180)
+            log_inner.addWidget(log_widget)
+            layout.addWidget(self.log_group, 3)
+
+            self.history_group = self._reg_title(QGroupBox(), "tab_history")
+            hist_inner = QVBoxLayout(self.history_group)
+            hist_inner.setContentsMargins(8, 8, 8, 8)
+            hist_widget = self._build_history_tab()
+            self.history_table.setMinimumHeight(140)
+            hist_inner.addWidget(hist_widget)
+            layout.addWidget(self.history_group, 2)
+            return page
+
+        def _build_threats_and_quarantine_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setSpacing(12)
+
+            self.threats_group = QGroupBox(self._tr("tab_threats", count=0))
+            threats_inner = QVBoxLayout(self.threats_group)
+            threats_inner.setContentsMargins(8, 8, 8, 8)
+            threats_widget = self._build_threats_tab()
+            self.threats_table.setMinimumHeight(140)
+            threats_inner.addWidget(threats_widget)
+            layout.addWidget(self.threats_group, 1)
+
+            self.quarantine_group = QGroupBox(self._tr("tab_quarantine", count=0))
+            quar_inner = QVBoxLayout(self.quarantine_group)
+            quar_inner.setContentsMargins(8, 8, 8, 8)
+            quar_widget = self._build_quarantine_tab()
+            self.quarantine_table.setMinimumHeight(140)
+            quar_inner.addWidget(quar_widget)
+            layout.addWidget(self.quarantine_group, 1)
+            return page
+
+        def _build_schedule_and_custom_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setSpacing(12)
+
+            self.schedule_group = self._reg_title(QGroupBox(), "tab_schedule")
+            sched_inner = QVBoxLayout(self.schedule_group)
+            sched_inner.setContentsMargins(8, 8, 8, 8)
+            sched_inner.addWidget(self._build_schedule_tab())
+            layout.addWidget(self.schedule_group)
+
+            self.custom_group = self._reg_title(QGroupBox(), "tab_custom")
+            custom_inner = QVBoxLayout(self.custom_group)
+            custom_inner.setContentsMargins(8, 8, 8, 8)
+            custom_inner.addWidget(self._build_new_scan_tab())
+            layout.addWidget(self.custom_group)
+            layout.addStretch(1)
+            return page
 
         def _build_log_tab(self) -> QWidget:
             tab = QWidget()
@@ -6014,12 +6076,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 ]
             )
 
-            self.tabs.setTabText(0, self._tr("tab_log"))
-            self.tabs.setTabText(2, self._tr("tab_quarantine", count=self._quarantine_count))
-            self.tabs.setTabText(3, self._tr("tab_history"))
-            self.tabs.setTabText(4, self._tr("tab_schedule"))
-            self.tabs.setTabText(5, self._tr("tab_custom"))
-            self.tabs.setTabText(6, self._tr("tab_db"))
+            self.threats_group.setTitle(self._tr("tab_threats", count=self.threats_table.rowCount()))
+            self.quarantine_group.setTitle(self._tr("tab_quarantine", count=self._quarantine_count))
+            self.tabs.setTabText(0, self._tab_label_log_history())
+            self.tabs.setTabText(1, self._tab_label_threats_quarantine())
+            self.tabs.setTabText(2, self._tab_label_schedule_custom())
+            self.tabs.setTabText(3, self._tr("tab_db"))
 
             self.toggle_tabs_btn.setText(
                 self._tr("hide_tabs_btn" if self.toggle_tabs_btn.isChecked() else "show_tabs_btn")
@@ -6981,7 +7043,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
         def _update_threat_count(self) -> None:
             count = self.threats_table.rowCount()
-            self.tabs.setTabText(1, self._tr("tab_threats", count=count))
+            self.threats_group.setTitle(self._tr("tab_threats", count=count))
+            self.tabs.setTabText(1, self._tab_label_threats_quarantine())
             if self._current_proc is None:
                 self._render_idle_stats_strip()
                 return
@@ -7253,7 +7316,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                     self.quarantine_table.setItem(row, 3, QTableWidgetItem(item.get("date", "")))
                     self.quarantine_table.setItem(row, 4, QTableWidgetItem(format_bytes(item.get("size", 0))))
                 self._quarantine_count = len(items)
-                self.tabs.setTabText(2, self._tr("tab_quarantine", count=self._quarantine_count))
+                self.quarantine_group.setTitle(self._tr("tab_quarantine", count=self._quarantine_count))
+                self.tabs.setTabText(1, self._tab_label_threats_quarantine())
             except Exception:  # noqa: BLE001
                 pass
 

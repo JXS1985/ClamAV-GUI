@@ -121,14 +121,11 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
         self.assertFalse(hasattr(self.win, "proc_combo"))
         self.assertFalse(hasattr(self.win, "cmdline_edit"))
 
-        self.assertEqual(self.win.tabs.count(), 7)
-        self.assertEqual(self.win.tabs.tabText(0), "Live Output & Log")
-        self.assertEqual(self.win.tabs.tabText(1), "Detected Threats (0)")
-        self.assertEqual(self.win.tabs.tabText(2), "Quarantine (0)")
-        self.assertEqual(self.win.tabs.tabText(3), "Scan History")
-        self.assertEqual(self.win.tabs.tabText(4), "Automatic Scans")
-        self.assertEqual(self.win.tabs.tabText(5), "Custom Scan (Advanced)")
-        self.assertEqual(self.win.tabs.tabText(6), "Virus Database")
+        self.assertEqual(self.win.tabs.count(), 4)
+        self.assertEqual(self.win.tabs.tabText(0), "Live Log && History")
+        self.assertEqual(self.win.tabs.tabText(1), "Threats (0) && Quarantine (0)")
+        self.assertEqual(self.win.tabs.tabText(2), "Schedule && Custom Scan")
+        self.assertEqual(self.win.tabs.tabText(3), "Virus Database")
 
         self.assertIn("ClamAV 1.4.6-test", self.win.meta_lbl.text())
         self.assertIn("Active", self.win.meta_lbl.text())
@@ -155,7 +152,7 @@ class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
         self.assertGreater(self.win.height(), initial_h + 200)
 
         # Switching tabs works cleanly once visible
-        for idx in range(7):
+        for idx in range(4):
             self.win._open_tab(idx)
             self.assertEqual(self.win.tabs.currentIndex(), idx)
 
@@ -205,11 +202,11 @@ class TestUILocalizationAndPersistence(unittest.TestCase):
                         self.assertEqual(win.card_io.title_lbl.text(), "Virensignaturen")
                         self.assertEqual(win.card_threats.title_lbl.text(), "Geplanter Scan")
                         self.assertEqual(win.progress_bar.text(), "Inaktiv")
-                        self.assertEqual(win.tabs.tabText(0), "Live-Ausgabe & Protokoll")
-                        self.assertEqual(win.tabs.tabText(2), "Quarantäne (0)")
-                        self.assertEqual(win.tabs.tabText(4), "Automatische Scans")
-                        self.assertEqual(win.tabs.tabText(5), "Benutzerdefinierter Scan (Erweitert)")
-                        self.assertEqual(win.tabs.tabText(6), "Virendatenbank")
+                        self.assertEqual(win.tabs.count(), 4)
+                        self.assertEqual(win.tabs.tabText(0), "Live-Protokoll && Verlauf")
+                        self.assertEqual(win.tabs.tabText(1), "Bedrohungen (0) && Quarantäne (0)")
+                        self.assertEqual(win.tabs.tabText(2), "Zeitplan && Erweiterter Scan")
+                        self.assertEqual(win.tabs.tabText(3), "Virendatenbank")
                         self.assertEqual(win.threats_table.horizontalHeaderItem(0).text(), "Dateipfad")
                         self.assertEqual(win.threats_table.horizontalHeaderItem(1).text(), "Bedrohungssignatur")
                         self.assertEqual(win.quarantine_table.horizontalHeaderItem(0).text(), "Dateiname")
@@ -903,7 +900,7 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
             self.assertEqual(self.win.threats_table.item(0, 2).text(), "Deleted")
 
     def test_quarantine_tab_refresh_restore_and_delete(self) -> None:
-        self.win._open_tab(2)
+        self.win._open_tab(1)
         items = [
             {
                 "name": "bad.sh",
@@ -933,7 +930,8 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
         ):
             self.win._refresh_quarantine()
             self.assertEqual(self.win.quarantine_table.rowCount(), 1)
-            self.assertEqual(self.win.tabs.tabText(2), "Quarantine (1)")
+            self.assertEqual(self.win.quarantine_group.title(), "Quarantine (1)")
+            self.assertEqual(self.win.tabs.tabText(1), "Threats (0) && Quarantine (1)")
             self.win.quarantine_table.selectRow(0)
 
             with (
@@ -944,12 +942,13 @@ class TestUIThreatsQuarantineAndHistoryTabs(unittest.TestCase, _UIEnvMixin):
                 self.win._restore_quarantine(pick_dir=True)
             mock_info.assert_called_once()
             self.assertEqual(self.win.quarantine_table.rowCount(), 0)
-            self.assertEqual(self.win.tabs.tabText(2), "Quarantine (0)")
+            self.assertEqual(self.win.quarantine_group.title(), "Quarantine (0)")
+            self.assertEqual(self.win.tabs.tabText(1), "Threats (0) && Quarantine (0)")
             restore_call = next(c for c in rpc_calls if c[0] == "restore_quarantine")
             self.assertEqual(restore_call[1]["dest_path"], "/tmp/restored/bad.sh")
 
     def test_history_tab_merge_log_summaries_and_clear(self) -> None:
-        self.win._open_tab(3)
+        self.win._open_tab(0)
         # Write a log summary to DEFAULT_LOG_PATH and an entry to HISTORY_FILE_PATH
         Path(app_mod.DEFAULT_LOG_PATH).write_text(
             "----------- SCAN SUMMARY -----------\n"
@@ -988,7 +987,7 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
         self._reset_window_state()
 
     def test_schedule_tab_refresh_daily_toggle_and_save(self) -> None:
-        self.win._open_tab(4)
+        self.win._open_tab(2)
         mock_sched = {
             "enabled": True,
             "scan_type": "full",
@@ -1055,7 +1054,7 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
 
                 # Unconnected save attempts to elevate via _require_root_helper
                 self.win.show()
-                self.win._open_tab(4)
+                self.win._open_tab(2)
                 self.win._qt_app.processEvents()
                 self.assertGreaterEqual(self.win.sched_status_lbl.width(), 450)
                 req_h1 = (
@@ -1114,7 +1113,7 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
                 app_mod.SYSTEMD_TIMER_PATH = orig_tmr
 
     def test_custom_scan_tab_preview_and_launch(self) -> None:
-        self.win._open_tab(5)
+        self.win._open_tab(2)
         self.win.scan_target_combo.setCurrentText("/var/www")
         self.win.opt_recursive.setChecked(True)
         self.win.opt_infected_only.setChecked(True)
@@ -1140,7 +1139,7 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(mock_call.call_args_list[0][0][1]["log_path"], "/tmp/myscan.log")
 
     def test_freshclam_tab_execution_and_completion_states(self) -> None:
-        self.win._open_tab(6)
+        self.win._open_tab(3)
         with (
             mock.patch.object(type(self.win.helper), "is_connected", new_callable=mock.PropertyMock, return_value=True),
             mock.patch("threading.Thread") as mock_thread,
@@ -1379,7 +1378,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
         QTest.mouseClick(self.win.hero_db_btn, Qt.MouseButton.LeftButton)
         self.win._qt_app.processEvents()
         self.assertFalse(self.win.tabs.isHidden())
-        self.assertEqual(self.win.tabs.currentIndex(), 6)
+        self.assertEqual(self.win.tabs.currentIndex(), 3)
 
         # Restoring healthy metadata clears warning and returns green Protected banner
         ok_meta = {
@@ -1539,6 +1538,15 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                             act_btn.width(),
                             msg=f"Active button overflow in {expected_code}: {t!r}",
                         )
+
+                    # Grouped 4 tabs fit horizontally without cramping/truncation
+                    w._open_tab(0)
+                    w._qt_app.processEvents()
+                    self.assertLessEqual(
+                        w.tabs.tabBar().sizeHint().width(),
+                        w.tabs.width(),
+                        msg=f"Tab bar overflow in {expected_code}: {w.tabs.tabBar().sizeHint().width()} > {w.tabs.width()}",
+                    )
                 finally:
                     w._force_quit = True
                     w.close()
