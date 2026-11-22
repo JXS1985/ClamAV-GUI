@@ -301,3 +301,32 @@ jobs:
             apt)    DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get remove -y clamav-security-center || true ;;
           esac
           rm -rf dist-ci
+
+  test-windows:
+    name: Windows (Python + PySide6)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PySide6
+        run: python -m pip install --upgrade pip PySide6
+
+      - name: Compile-check Python modules
+        run: python -m py_compile clamav_gui.py test_clamav_gui.py test_ui_clamav_gui.py
+
+      - name: Run self-test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python clamav_gui.py --self-test
+
+      - name: Run unit and UI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s . -p "test_*.py" -v

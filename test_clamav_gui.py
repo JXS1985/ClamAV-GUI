@@ -230,6 +230,7 @@ class TestFormattingAndParsers(unittest.TestCase):
 class TestProcAndFilesystemTelemetry(unittest.TestCase):
     """Tests for /proc inspection, PID validation, statvfs disk estimation, and background pre-counter."""
 
+    @unittest.skipIf(os.name == "nt", "POSIX /proc and UID test")
     def test_proc_readers_on_self_and_missing(self) -> None:
         pid = os.getpid()
         self.assertGreater(app_mod.parse_proc_uptime(), 0.0)
@@ -249,6 +250,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
         self.assertIsNone(app_mod.parse_proc_stat(99999999))
         self.assertEqual(app_mod.read_proc_cmdline(99999999), [])
 
+    @unittest.skipIf(os.name == "nt", "POSIX /proc and UID test")
     def test_discover_clamscan_processes_and_validate_pid(self) -> None:
         # Real PID 1 or self is not clamscan -> PermissionError
         with self.assertRaises(ValueError):
@@ -313,6 +315,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
             self.assertEqual(found[0]["log_path"], "/tmp/t.log")
             self.assertTrue(found[0]["quiet_infected_only"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX /proc fd test")
     def test_inspect_proc_fds_and_io(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fd_dir = Path(tmpdir) / "fd"
@@ -385,6 +388,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
             self.assertFalse(snap_empty.get("running"))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX helper handler tests")
 class TestPrivilegedHelperHandlers(unittest.TestCase):
     """Tests for helper file/process/systemd/polkit/quarantine handlers with mocked privileged OS ops."""
 
@@ -637,6 +641,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
 class TestHelperRPCSubprocessAndClient(unittest.TestCase):
     """Integration tests spawning `--helper` and verifying HelperClient error/disconnect handling."""
 
+    @unittest.skipIf(os.name == "nt", "POSIX helper RPC / SIGSTOP security test")
     def test_helper_rpc_protocol_and_security_guards(self) -> None:
         proc = subprocess.Popen(
             [sys.executable, app_mod.SCRIPT_PATH, "--helper"],
@@ -854,6 +859,7 @@ class TestDesktopEnvironmentIntegration(unittest.TestCase):
         ):
             self.assertEqual(app_mod.detect_desktop_environment(), "other")
 
+    @unittest.skipIf(os.name == "nt", "POSIX desktop reveal test")
     def test_build_reveal_file_command_kde_gnome_and_fallbacks(self) -> None:
         # KDE selects Dolphin
         with mock.patch("shutil.which", side_effect=lambda b: "/usr/bin/dolphin" if b == "dolphin" else None):
@@ -886,6 +892,7 @@ class TestDesktopEnvironmentIntegration(unittest.TestCase):
             )
 
 
+@unittest.skipIf(os.name == "nt", "POSIX security hardening tests")
 class TestSecurityHardening(unittest.TestCase):
     """Security regression tests for root helper privilege boundaries and input sanitization."""
 
@@ -1110,6 +1117,7 @@ class TestSecurityHardening(unittest.TestCase):
                 vos.verify_start_menu_entry("gnome")
 
 
+@unittest.skipIf(os.name == "nt", "POSIX signal and systemd schedule tests")
 class TestScheduleAndCancellation(unittest.TestCase):
     """Real-subprocess and filesystem tests for scan cancellation, precount cancel, and systemd schedules."""
 
@@ -1269,6 +1277,243 @@ class TestScheduleAndCancellation(unittest.TestCase):
                 )
             self.assertFalse((real_target_dir / "nested").exists())
             self.assertTrue(Path(r1["dest"]).exists())
+
+
+class TestWindowsCompatibility(unittest.TestCase):
+    """Cross-platform tests for Windows ClamAV discovery, freshclam auto-config, local helper, and Task Scheduler."""
+
+    def test_win_clamav_dirs_and_default_db_dir(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LOCALAPPDATA": "/tmp/win_local",
+                "ProgramFiles": "/tmp/win_pf",
+                "ProgramFiles(x86)": "/tmp/win_pf86",
+            },
+            clear=False,
+        ):
+            dirs = app_mod._win_clamav_dirs()
+        self.assertTrue(any("ClamAV" in d for d in dirs))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            empty_db = root / "empty"
+            empty_db.mkdir()
+            self.assertFalse(app_mod._has_clamav_db_files(str(empty_db)))
+
+            install_dir = root / "ClamAV"
+            db_dir = install_dir / "database"
+            db_dir.mkdir(parents=True)
+            (db_dir / "main.cvd").write_bytes(b"CVD")
+            self.assertTrue(app_mod._has_clamav_db_files(str(db_dir)))
+
+            orig_app_dir = app_mod.APP_DATA_DIR
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", True),
+                    mock.patch.object(app_mod, "_win_clamav_dirs", return_value=[str(install_dir)]),
+                ):
+                    self.assertEqual(app_mod._default_db_dir(), str(db_dir))
+                    (db_dir / "main.cvd").unlink()
+                    self.assertEqual(app_mod._default_db_dir(), str(app_mod.APP_DATA_DIR / "database"))
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+
+    def test_ensure_windows_freshclam_config_unblocks_example_and_creates_db_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+
+                # 1. Existing freshclam.conf in writable install dir has upstream `Example` blocker
+                install_dir = root / "install_clamav"
+                install_dir.mkdir()
+                fc_bin = install_dir / "freshclam.exe"
+                fc_bin.write_text("", encoding="utf-8")
+                conf_file = install_dir / "freshclam.conf"
+                conf_file.write_text("Example\nChecks 12\n", encoding="utf-8")
+
+                with mock.patch.object(app_mod, "_win_clamav_dirs", return_value=[str(install_dir)]):
+                    out_conf, out_db = app_mod._ensure_windows_freshclam_config(str(fc_bin))
+
+                self.assertEqual(out_conf, str(conf_file))
+                self.assertEqual(out_db, str(install_dir / "database"))
+                self.assertTrue(Path(out_db).is_dir())
+                conf_txt = Path(out_conf).read_text(encoding="utf-8")
+                self.assertIn("# Example (disabled automatically by ClamAV Security Center)", conf_txt)
+                self.assertNotIn("\nExample\n", f"\n{conf_txt}")
+                self.assertIn("DatabaseMirror database.clamav.net", conf_txt)
+                self.assertIn("DatabaseDirectory", conf_txt)
+
+                # 2. Unwritable install dir falls back to APP_DATA_DIR
+                with (
+                    mock.patch.object(app_mod, "_win_clamav_dirs", return_value=[]),
+                    mock.patch.object(
+                        app_mod,
+                        "_is_dir_writable",
+                        side_effect=lambda p: Path(p) != install_dir,
+                    ),
+                ):
+                    fb_conf, fb_db = app_mod._ensure_windows_freshclam_config(str(fc_bin))
+                self.assertEqual(fb_conf, str(app_mod.APP_DATA_DIR / "freshclam.conf"))
+                self.assertTrue(Path(fb_conf).is_file())
+                self.assertTrue(Path(fb_db).is_dir())
+                self.assertIn("DatabaseMirror database.clamav.net", Path(fb_conf).read_text(encoding="utf-8"))
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+
+    def test_windows_dependencies_reveal_and_statvfs_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample = Path(tmpdir) / "threat.exe"
+            sample.write_bytes(b"MZ")
+
+            with (
+                mock.patch.object(app_mod, "IS_WINDOWS", True),
+                mock.patch("shutil.which", return_value=None),
+                mock.patch("os.path.isfile", return_value=False),
+            ):
+                deps = app_mod.check_system_dependencies(db_dir=tmpdir)
+            self.assertEqual(deps["missing_required"], ["clamscan", "freshclam"])
+            self.assertEqual(deps["missing_optional"], [])
+            self.assertFalse(deps["tools"]["pkexec"])
+            self.assertFalse(deps["tools"]["sudo"])
+            self.assertTrue(deps["tools"]["find"])
+
+            with mock.patch.object(app_mod, "IS_WINDOWS", True):
+                cmd = app_mod.build_reveal_file_command(str(sample))
+                used = app_mod.estimate_statvfs_used_bytes([tmpdir])
+            self.assertEqual(cmd, ["explorer.exe", f"/select,{os.path.normpath(str(sample))}"])
+            self.assertGreater(used, 0)
+
+    def test_walk_precount_and_start_background_precount_on_windows(self) -> None:
+        app_mod.cancel_background_precount()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            a = root / "a.bin"
+            b = root / "sub" / "b.bin"
+            big = root / "big.bin"
+            excl = root / "skip"
+            excl_f = excl / "ignored.bin"
+            b.parent.mkdir()
+            excl.mkdir()
+            a.write_bytes(b"a" * 120)
+            b.write_bytes(b"b" * 80)
+            big.write_bytes(b"c" * 2000)
+            excl_f.write_bytes(b"d" * 50)
+
+            with mock.patch.object(app_mod, "IS_WINDOWS", True):
+                snap = app_mod.start_background_precount([tmpdir], [str(excl)], 500, cross_fs=True)
+                deadline = time.monotonic() + 5.0
+                while not snap.get("done") and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                    snap = app_mod.get_precount_snapshot()
+
+            self.assertTrue(snap.get("done"))
+            self.assertEqual(snap["all_files"], 3)
+            self.assertEqual(snap["all_bytes"], 2200)
+            self.assertEqual(snap["eligible_files"], 2)
+            self.assertEqual(snap["eligible_bytes"], 200)
+
+    def test_helper_start_local_and_validate_windows_clamscan_args(self) -> None:
+        client = app_mod.HelperClient()
+        try:
+            ok, msg = client.start_local()
+            self.assertTrue(ok, msg=msg)
+            self.assertIn("Local helper", msg)
+            with mock.patch.object(app_mod, "IS_WINDOWS", True):
+                self.assertTrue(client.is_connected)
+            ping_res = client.call("ping")
+            self.assertIsInstance(ping_res["pid"], int)
+        finally:
+            client.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            exe_path = root / "clamscan.exe"
+            exe_path.write_text("", encoding="utf-8")
+            exe_path.chmod(0o755)
+            db_dir = root / "db"
+            db_dir.mkdir()
+            with (
+                mock.patch.object(app_mod, "IS_WINDOWS", True),
+                mock.patch("shutil.which", return_value=None),
+                mock.patch.object(app_mod, "_win_clamav_dirs", return_value=[str(root)]),
+            ):
+                res1 = app_mod._validate_clamscan_args([str(exe_path), f"--database={db_dir}", tmpdir])
+                res2 = app_mod._validate_clamscan_args(["clamscan.exe", "-d", str(db_dir), tmpdir])
+            self.assertEqual(os.path.basename(res1[0]).lower(), "clamscan.exe")
+            self.assertIn(f"--database={db_dir}", res1)
+            self.assertEqual(os.path.basename(res2[0]).lower(), "clamscan.exe")
+            self.assertIn(f"--database={db_dir}", res2)
+
+    def test_windows_schedule_set_and_get(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            orig_cfg = app_mod.WINDOWS_SCHEDULE_CONFIG_PATH
+            orig_log = app_mod.DEFAULT_LOG_PATH
+            cmds: list[list[str]] = []
+            task_active = {"val": True}
+
+            def _fake_run(cmd: list[str], **_kwargs: object) -> mock.Mock:
+                cmds.append(list(cmd))
+                if cmd[:2] == ["schtasks", "/Create"]:
+                    task_active["val"] = True
+                    return mock.Mock(returncode=0, stdout="SUCCESS\n", stderr="")
+                if cmd[:2] == ["schtasks", "/Delete"]:
+                    task_active["val"] = False
+                    return mock.Mock(returncode=0, stdout="SUCCESS\n", stderr="")
+                if cmd[:2] == ["schtasks", "/Query"]:
+                    if task_active["val"]:
+                        return mock.Mock(
+                            returncode=0,
+                            stdout=f'"\\{app_mod.WINDOWS_TASK_NAME}","2026-11-23 04:15:00","Ready"\n',
+                            stderr="",
+                        )
+                    return mock.Mock(returncode=1, stdout="", stderr="ERROR: cannot find")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                app_mod.WINDOWS_SCHEDULE_CONFIG_PATH = app_mod.APP_DATA_DIR / "schedule.json"
+                app_mod.DEFAULT_LOG_PATH = str(app_mod.APP_DATA_DIR / "clamav-scan.log")
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", True),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res_on = app_mod._helper_windows_set_schedule(
+                        {
+                            "enabled": True,
+                            "frequency": "weekly",
+                            "day_of_week": "Tue",
+                            "time_of_day": "04:15",
+                            "scan_type": "quick",
+                            "quick_targets": [tmpdir],
+                        }
+                    )
+                self.assertTrue(res_on["enabled"])
+                self.assertEqual(res_on["day_of_week"], "Tue")
+                self.assertEqual(res_on["time_of_day"], "04:15")
+                self.assertEqual(res_on["next_run"], "2026-11-23 04:15:00")
+                cmd_file = app_mod.APP_DATA_DIR / "scheduled-scan.cmd"
+                self.assertTrue(cmd_file.is_file())
+                self.assertIn("clamscan", cmd_file.read_text(encoding="utf-8").lower())
+                self.assertTrue(any(c[:2] == ["schtasks", "/Create"] and "/D" in c and "TUE" in c for c in cmds))
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", True),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res_off = app_mod._helper_windows_set_schedule({"enabled": False})
+                self.assertFalse(res_off["enabled"])
+                self.assertTrue(any(c[:2] == ["schtasks", "/Delete"] for c in cmds))
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+                app_mod.WINDOWS_SCHEDULE_CONFIG_PATH = orig_cfg
+                app_mod.DEFAULT_LOG_PATH = orig_log
 
 
 if __name__ == "__main__":

@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import csv
 import datetime
 import getpass
 import json
 import locale
 import os
-import pwd
+try:
+    import pwd
+except ImportError:  # Windows has no POSIX pwd database
+    pwd = None  # type: ignore[assignment]
 import queue
 import re
 import shutil
@@ -27,28 +31,80 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_PATH = str(Path(__file__).resolve())
+IS_WINDOWS = os.name == "nt"
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WINDOWS else 0
+
+
+def _euid() -> int:
+    return os.geteuid() if hasattr(os, "geteuid") else 0
+
+
+def _uid() -> int:
+    return os.getuid() if hasattr(os, "getuid") else 0
+
+
+def _is_posix_root() -> bool:
+    return (not IS_WINDOWS) and _euid() == 0
+
+
+def _self_helper_cmd() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--helper"]
+    return [sys.executable, SCRIPT_PATH, "--helper"]
+
+
+def _system_root_target() -> str:
+    if IS_WINDOWS:
+        drive = os.environ.get("SystemDrive", "C:").rstrip("\\/")
+        return f"{drive}\\"
+    return "/"
+
+
+def _win_clamav_dirs() -> list[str]:
+    local_app = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    prog_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    prog_x86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    candidates = [
+        os.path.join(prog_files, "ClamAV"),
+        os.path.join(prog_x86, "ClamAV"),
+        r"C:\ClamAV",
+        os.path.join(local_app, "Programs", "ClamAV"),
+        os.path.join(local_app, "ClamAV"),
+    ]
+    return [p for i, p in enumerate(candidates) if p and p not in candidates[:i]]
 
 
 def _ensure_standard_path() -> None:
-    """Include /usr/sbin and /sbin so system tools are found across distros."""
-    extra = ["/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
+    """Include /usr/sbin and /sbin (or Windows ClamAV dirs) so tools are found cleanly."""
+    extra = (
+        _win_clamav_dirs()
+        if IS_WINDOWS
+        else ["/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
+    )
     current = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     merged = current + [p for p in extra if p not in current]
     os.environ["PATH"] = os.pathsep.join(merged)
 
 
 _ensure_standard_path()
-DEFAULT_LOG_PATH = "/var/log/clamav-scan.log"
-DEFAULT_QUARANTINE_DIR = "/root/quarantine"
-QUARANTINE_MANIFEST = "manifest.json"
-POLKIT_RULE_PATH = "/etc/polkit-1/rules.d/49-clamav-kde-gui.rules"
-SYSTEMD_SERVICE_PATH = "/etc/systemd/system/clamav-gui-scan.service"
-SYSTEMD_TIMER_PATH = "/etc/systemd/system/clamav-gui-scan.timer"
 APP_VERSION = "1.0.0"
 APP_AUTHOR = "Armin Schneider (@JXS1985)"
 APP_GITHUB_URL = "https://github.com/JXS1985/ClamAV-GUI"
 APP_LICENSE = "GNU General Public License v3.0 (GPL-3.0)"
-APP_DATA_DIR = Path.home() / ".local" / "share" / "clamav-kde-gui"
+if IS_WINDOWS:
+    APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "clamav-kde-gui"
+    DEFAULT_LOG_PATH = str(APP_DATA_DIR / "clamav-scan.log")
+    DEFAULT_QUARANTINE_DIR = str(APP_DATA_DIR / "quarantine")
+else:
+    APP_DATA_DIR = Path.home() / ".local" / "share" / "clamav-kde-gui"
+    DEFAULT_LOG_PATH = "/var/log/clamav-scan.log"
+    DEFAULT_QUARANTINE_DIR = "/root/quarantine"
+QUARANTINE_MANIFEST = "manifest.json"
+POLKIT_RULE_PATH = "/etc/polkit-1/rules.d/49-clamav-kde-gui.rules"
+SYSTEMD_SERVICE_PATH = "/etc/systemd/system/clamav-gui-scan.service"
+SYSTEMD_TIMER_PATH = "/etc/systemd/system/clamav-gui-scan.timer"
+WINDOWS_SCHEDULE_CONFIG_PATH = APP_DATA_DIR / "schedule.json"
+WINDOWS_TASK_NAME = "ClamAVSecurityCenterScan"
 HISTORY_FILE_PATH = APP_DATA_DIR / "history.json"
 SETTINGS_FILE_PATH = APP_DATA_DIR / "settings.json"
 THREAT_LINE_RE = re.compile(r"^(.+?):\s+(.+?)\s+FOUND\s*$")
@@ -2441,7 +2497,7 @@ def parse_proc_status(pid: int) -> dict[str, Any]:
                         uid = int(parts[1])
                         info["uid"] = uid
                         try:
-                            info["user"] = pwd.getpwuid(uid).pw_name
+                            info["user"] = pwd.getpwuid(uid).pw_name if pwd is not None else str(uid)
                         except KeyError:
                             info["user"] = str(uid)
                 elif line.startswith("VmRSS:"):
@@ -2467,10 +2523,237 @@ def read_proc_cmdline(pid: int) -> list[str]:
         return []
 
 
+_SPAWNED_PROCS_LOCK = threading.Lock()
+_SPAWNED_PROCS: dict[int, subprocess.Popen[Any]] = {}
+_SPAWNED_PROCS_META: dict[int, dict[str, Any]] = {}
+_WINDOWS_PAUSED_PIDS: set[int] = set()
+
+
+def _win32_suspend_resume(pid: int, suspend: bool) -> None:
+    """Suspend or resume a Windows process via NtSuspendProcess / NtResumeProcess."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x0800, False, int(pid))
+    if not handle:
+        raise ProcessLookupError(f"Process {pid} no longer exists")
+    try:
+        fn = ntdll.NtSuspendProcess if suspend else ntdll.NtResumeProcess
+        fn.argtypes = [wintypes.HANDLE]
+        fn.restype = ctypes.c_long
+        status = fn(handle)
+        if status < 0:
+            raise OSError(f"Failed changing Windows process state for PID {pid}: {status:#x}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win32_set_priority(pid: int, mode: str) -> None:
+    """Adjust Windows process priority class ('normal', 'low', or 'idle')."""
+    import ctypes
+    from ctypes import wintypes
+
+    prio_map = {"normal": 0x00000020, "low": 0x00004000, "idle": 0x00000040}
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.SetPriorityClass.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x0200, False, int(pid))
+    if not handle:
+        raise ProcessLookupError(f"Process {pid} no longer exists")
+    try:
+        if not kernel32.SetPriorityClass(handle, prio_map[mode]):
+            raise OSError(f"SetPriorityClass failed for PID {pid}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win32_get_io_counters(pid: int) -> dict[str, int]:
+    """Read cumulative Windows process I/O transfer counters via GetProcessIoCounters."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessIoCounters.argtypes = [wintypes.HANDLE, ctypes.POINTER(_IoCounters)]
+    kernel32.GetProcessIoCounters.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return {}
+    try:
+        counters = _IoCounters()
+        if not kernel32.GetProcessIoCounters(handle, ctypes.byref(counters)):
+            return {}
+        read_b = int(counters.ReadTransferCount)
+        write_b = int(counters.WriteTransferCount)
+        return {"rchar": read_b, "wchar": write_b, "read_bytes": read_b, "write_bytes": write_b}
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win32_get_proc_times_and_priority(pid: int) -> tuple[int, int, float]:
+    """Return (cpu_ticks_10ms, nice_equiv, elapsed_sec) for a Windows PID."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+    kernel32.GetPriorityClass.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return 0, 0, 0.0
+    try:
+        prio = int(kernel32.GetPriorityClass(handle))
+        nice_eq = 19 if prio == 0x00000040 else (10 if prio == 0x00004000 else 0)
+        c_ft, e_ft, k_ft, u_ft = (
+            wintypes.FILETIME(),
+            wintypes.FILETIME(),
+            wintypes.FILETIME(),
+            wintypes.FILETIME(),
+        )
+        cpu_ticks = 0
+        elapsed = 0.0
+        if kernel32.GetProcessTimes(handle, ctypes.byref(c_ft), ctypes.byref(e_ft), ctypes.byref(k_ft), ctypes.byref(u_ft)):
+            k_100ns = (k_ft.dwHighDateTime << 32) | k_ft.dwLowDateTime
+            u_100ns = (u_ft.dwHighDateTime << 32) | u_ft.dwLowDateTime
+            c_100ns = (c_ft.dwHighDateTime << 32) | c_ft.dwLowDateTime
+            cpu_ticks = int((k_100ns + u_100ns) // 100_000)
+            created_unix = (c_100ns - 116444736000000000) / 10_000_000.0
+            elapsed = max(0.0, time.time() - created_unix) if created_unix > 0 else 0.0
+        return cpu_ticks, nice_eq, elapsed
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _win32_is_pid_running(pid: int) -> bool:
+    """Return True if a Windows PID currently exists and has exit code STILL_ACTIVE."""
+    if pid <= 0:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD(0)
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return int(code.value) == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _is_pid_running(pid: int) -> bool:
+    if IS_WINDOWS:
+        return _win32_is_pid_running(pid)
+    return os.path.exists(f"/proc/{pid}")
+
+
+def _discover_windows_clamscan_processes() -> list[dict[str, Any]]:
+    """Discover running clamscan.exe processes on Windows using spawned metadata + tasklist."""
+    meta_by_pid: dict[int, dict[str, Any]] = {}
+    with _SPAWNED_PROCS_LOCK:
+        for pid, proc in list(_SPAWNED_PROCS.items()):
+            if proc.poll() is None:
+                meta_by_pid[pid] = dict(_SPAWNED_PROCS_META.get(pid) or {})
+
+    tasklist_mem: dict[int, int] = {}
+    try:
+        res = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH", "/FI", "IMAGENAME eq clamscan.exe"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            for row in csv.reader(res.stdout.splitlines()):
+                if len(row) >= 5 and row[0].strip().lower() == "clamscan.exe" and row[1].strip().isdigit():
+                    pid_val = int(row[1].strip())
+                    mem_digits = "".join(ch for ch in row[4] if ch.isdigit())
+                    tasklist_mem[pid_val] = int(mem_digits) if mem_digits else 0
+                    meta_by_pid.setdefault(pid_val, {})
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    current_user = getpass.getuser()
+    found: list[dict[str, Any]] = []
+    for pid, meta in meta_by_pid.items():
+        if not _win32_is_pid_running(pid):
+            continue
+        cmdline = list(meta.get("cmdline") or ["clamscan.exe"])
+        cpu_ticks, nice_eq, win_elapsed = _win32_get_proc_times_and_priority(pid)
+        elapsed = (
+            max(0.0, time.monotonic() - float(meta["start_time"]))
+            if "start_time" in meta
+            else win_elapsed
+        )
+        with _SPAWNED_PROCS_LOCK:
+            paused = pid in _WINDOWS_PAUSED_PIDS
+        found.append(
+            {
+                "pid": pid,
+                "comm": "clamscan.exe",
+                "state": "T" if paused else "R",
+                "nice": nice_eq,
+                "cpu_ticks": cpu_ticks,
+                "elapsed_sec": elapsed,
+                "uid": _uid(),
+                "user": current_user,
+                "rss_kb": tasklist_mem.get(pid, 0),
+                "voluntary_ctxt_switches": 0,
+                "nonvoluntary_ctxt_switches": 0,
+                "cmdline": cmdline,
+                "cmdline_str": " ".join(cmdline) if cmdline else "clamscan.exe",
+                "log_path": str(meta.get("log_path") or extract_log_path_from_cmdline(cmdline)),
+                "quiet_infected_only": ("-i" in cmdline or "--infected" in cmdline),
+            }
+        )
+    found.sort(key=lambda item: item["pid"])
+    return found
+
+
 def discover_clamscan_processes() -> list[dict[str, Any]]:
-    """Discover all active clamscan processes via /proc without root."""
+    """Discover all active clamscan processes across Linux (/proc) and Windows."""
+    if IS_WINDOWS:
+        return _discover_windows_clamscan_processes()
     uptime = parse_proc_uptime()
-    clk_tck = os.sysconf("SC_CLK_TCK")
+    clk_tck = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
     found: list[dict[str, Any]] = []
 
     try:
@@ -2563,8 +2846,10 @@ def parse_size_to_bytes(val: str, default: int = 25 * 1024 * 1024) -> int:
 
 def _normalize_exclude_path(raw: str) -> str | None:
     """Convert a clamscan --exclude-dir regex/path into a find-compatible path."""
-    cleaned = raw.strip().lstrip("^").rstrip("$").rstrip("/")
-    if not cleaned or not cleaned.startswith("/"):
+    cleaned = raw.strip().lstrip("^").rstrip("$").rstrip("/\\")
+    if not cleaned:
+        return None
+    if not (cleaned.startswith("/") or (len(cleaned) >= 2 and cleaned[1] == ":")):
         return None
     if any(ch in cleaned for ch in ("*", "?", "[", "(", "|", "+")):
         return None
@@ -2591,7 +2876,7 @@ def parse_scan_targets_and_limits(cmdline: list[str]) -> dict[str, Any]:
         "--file-list",
     }
     targets: list[str] = []
-    exclude_dirs: list[str] = ["/proc", "/sys", "/dev", "/run"]
+    exclude_dirs: list[str] = [] if IS_WINDOWS else ["/proc", "/sys", "/dev", "/run"]
     max_filesize = 25 * 1024 * 1024
     cross_fs = True
 
@@ -2628,7 +2913,7 @@ def parse_scan_targets_and_limits(cmdline: list[str]) -> dict[str, Any]:
         idx += 1
 
     if not targets:
-        targets = ["/"]
+        targets = [_system_root_target()]
 
     return {
         "targets": targets,
@@ -2642,7 +2927,7 @@ def estimate_statvfs_used_bytes(targets: list[str], cross_fs: bool = True) -> in
     """Stage 1 instant disk-space estimator summing unique mounted local filesystems."""
     local_fs_types = {"ext4", "ext3", "ext2", "xfs", "btrfs", "vfat", "ntfs", "ntfs3", "f2fs", "zfs", "exfat"}
     mounts: list[str] = []
-    if cross_fs:
+    if cross_fs and not IS_WINDOWS:
         try:
             with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
@@ -2655,18 +2940,19 @@ def estimate_statvfs_used_bytes(targets: list[str], cross_fs: bool = True) -> in
     seen_devs: set[int] = set()
     total_used = 0
     for target in targets:
-        if not os.path.exists(target):
+        resolved_target = _system_root_target() if IS_WINDOWS and target == "/" else target
+        if not os.path.exists(resolved_target):
             continue
-        if os.path.isfile(target):
+        if os.path.isfile(resolved_target):
             try:
-                total_used += os.path.getsize(target)
+                total_used += os.path.getsize(resolved_target)
             except OSError:
                 pass
             continue
 
-        norm_target = os.path.realpath(target)
+        norm_target = os.path.realpath(resolved_target)
         candidate_paths = [norm_target]
-        if cross_fs:
+        if cross_fs and not IS_WINDOWS:
             prefix = "/" if norm_target == "/" else norm_target.rstrip("/") + "/"
             for mp in mounts:
                 if mp == norm_target or (norm_target == "/" and mp.startswith("/")) or mp.startswith(prefix):
@@ -2678,8 +2964,11 @@ def estimate_statvfs_used_bytes(targets: list[str], cross_fs: bool = True) -> in
                 if dev in seen_devs:
                     continue
                 seen_devs.add(dev)
-                st = os.statvfs(path)
-                total_used += max(0, (st.f_blocks - st.f_bfree) * st.f_frsize)
+                if hasattr(os, "statvfs") and not IS_WINDOWS:
+                    st = os.statvfs(path)
+                    total_used += max(0, (st.f_blocks - st.f_bfree) * st.f_frsize)
+                else:
+                    total_used += max(0, int(shutil.disk_usage(path).used))
             except OSError:
                 continue
 
@@ -2699,7 +2988,7 @@ _PRECOUNT_STATE: dict[str, Any] = {
     "eligible_files": 0,
     "eligible_bytes": 0,
     "max_filesize": 25 * 1024 * 1024,
-    "uid": os.geteuid(),
+    "uid": _euid(),
     "elapsed_sec": 0.0,
 }
 
@@ -2744,17 +3033,111 @@ def cancel_background_precount() -> None:
                 pass
 
 
+def _walk_precount(
+    valid_targets: list[str],
+    exclude_dirs: list[str],
+    max_filesize: int,
+    cross_fs: bool,
+    gen: int,
+    t0: float,
+) -> None:
+    """Pure-Python directory walker fallback for Windows or environments without GNU find."""
+    excl_norm = {os.path.normcase(os.path.abspath(ex)) for ex in exclude_dirs if ex}
+    all_files = 0
+    all_bytes = 0
+    eligible_files = 0
+    eligible_bytes = 0
+
+    for target in valid_targets:
+        with _PRECOUNT_LOCK:
+            if _PRECOUNT_STATE.get("gen") != gen:
+                return
+        if os.path.isfile(target):
+            try:
+                sz = os.path.getsize(target)
+            except OSError:
+                sz = 0
+            all_files += 1
+            all_bytes += sz
+            if sz <= max_filesize:
+                eligible_files += 1
+                eligible_bytes += sz
+            continue
+
+        try:
+            root_dev = os.stat(target).st_dev if not cross_fs else None
+        except OSError:
+            continue
+
+        for root, dirs, files in os.walk(target, followlinks=False):
+            with _PRECOUNT_LOCK:
+                if _PRECOUNT_STATE.get("gen") != gen:
+                    return
+            kept_dirs: list[str] = []
+            for dname in dirs:
+                dpath = os.path.join(root, dname)
+                if os.path.normcase(os.path.abspath(dpath)) in excl_norm:
+                    continue
+                if root_dev is not None:
+                    try:
+                        if os.stat(dpath).st_dev != root_dev:
+                            continue
+                    except OSError:
+                        continue
+                kept_dirs.append(dname)
+            dirs[:] = kept_dirs
+
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                try:
+                    sz = os.lstat(fpath).st_size
+                except OSError:
+                    continue
+                all_files += 1
+                all_bytes += sz
+                if sz <= max_filesize:
+                    eligible_files += 1
+                    eligible_bytes += sz
+                if all_files % 5000 == 0:
+                    with _PRECOUNT_LOCK:
+                        if _PRECOUNT_STATE.get("gen") != gen:
+                            return
+                        _PRECOUNT_STATE.update(
+                            {
+                                "all_files": all_files,
+                                "all_bytes": all_bytes,
+                                "eligible_files": eligible_files,
+                                "eligible_bytes": eligible_bytes,
+                                "elapsed_sec": time.monotonic() - t0,
+                            }
+                        )
+
+    with _PRECOUNT_LOCK:
+        if _PRECOUNT_STATE.get("gen") == gen:
+            _PRECOUNT_STATE.update(
+                {
+                    "running": False,
+                    "done": True,
+                    "all_files": all_files,
+                    "all_bytes": all_bytes,
+                    "eligible_files": eligible_files,
+                    "eligible_bytes": eligible_bytes,
+                    "elapsed_sec": time.monotonic() - t0,
+                }
+            )
+
+
 def start_background_precount(
     targets: list[str],
     exclude_dirs: list[str],
     max_filesize: int,
     cross_fs: bool,
 ) -> dict[str, Any]:
-    """Start Stage 2 background GNU find file/byte pre-count if configuration changed."""
+    """Start Stage 2 background file/byte pre-count if configuration changed."""
     global _PRECOUNT_GEN, _PRECOUNT_PROC
 
     valid_targets = [t for t in targets if os.path.exists(t)]
-    key = (tuple(valid_targets), tuple(exclude_dirs), int(max_filesize), bool(cross_fs), os.geteuid())
+    key = (tuple(valid_targets), tuple(exclude_dirs), int(max_filesize), bool(cross_fs), _euid())
 
     with _PRECOUNT_LOCK:
         if _PRECOUNT_STATE.get("key") == key and (_PRECOUNT_STATE.get("running") or _PRECOUNT_STATE.get("done")):
@@ -2778,7 +3161,7 @@ def start_background_precount(
                 "eligible_files": 0,
                 "eligible_bytes": 0,
                 "max_filesize": max_filesize,
-                "uid": os.geteuid(),
+                "uid": _euid(),
                 "elapsed_sec": 0.0,
             }
         )
@@ -2800,6 +3183,9 @@ def start_background_precount(
         with _PRECOUNT_LOCK:
             if _PRECOUNT_STATE.get("gen") != gen:
                 return
+        if IS_WINDOWS or shutil.which("find") is None:
+            _walk_precount(valid_targets, exclude_dirs, max_filesize, cross_fs, gen, t0)
+            return
         cmd: list[str] = []
         if shutil.which("ionice"):
             cmd.extend(["ionice", "-c", "3"])
@@ -2978,6 +3364,8 @@ def _is_secure_root_owned_path(path: str) -> bool:
 
 def _resolve_invoking_username() -> str | None:
     """Return username of the non-root caller under pkexec or sudo if present."""
+    if pwd is None:
+        return None
     for env_key in ("PKEXEC_UID", "SUDO_UID"):
         raw = os.environ.get(env_key, "").strip()
         if raw.isdigit():
@@ -3009,6 +3397,22 @@ def _is_protected_system_path(target: str) -> bool:
     }
     if target in protected_exact or real in protected_exact:
         return True
+    if IS_WINDOWS:
+        win_prefixes = [
+            p
+            for p in (
+                os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows",
+                os.environ.get("ProgramFiles") or r"C:\Program Files",
+                os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)",
+            )
+            if p
+        ]
+        for candidate in (target, real):
+            norm_c = os.path.normcase(os.path.abspath(candidate))
+            for pref in win_prefixes:
+                norm_p = os.path.normcase(os.path.abspath(pref)).rstrip("\\")
+                if norm_c == norm_p or norm_c.startswith(norm_p + "\\"):
+                    return True
     for candidate in (target, real):
         for prefix in _PROTECTED_SYSTEM_PREFIXES:
             if candidate == prefix or candidate.startswith(prefix + "/"):
@@ -3025,7 +3429,7 @@ def _validate_helper_log_path(log_path: str) -> str:
         raise PermissionError(f"Invalid log path: {cleaned}")
     if os.path.islink(cleaned):
         raise PermissionError(f"Refusing symlink log path: {cleaned}")
-    if os.geteuid() != 0:
+    if IS_WINDOWS or _euid() != 0:
         return cleaned
 
     parent = os.path.realpath(os.path.dirname(cleaned))
@@ -3043,7 +3447,7 @@ def _resolve_quarantine_dir(raw_qdir: Any) -> str:
     requested = str(raw_qdir or DEFAULT_QUARANTINE_DIR).strip() or DEFAULT_QUARANTINE_DIR
     if "\x00" in requested or not os.path.isabs(requested):
         raise ValueError(f"Invalid quarantine directory: {requested}")
-    if os.geteuid() == 0:
+    if (not IS_WINDOWS) and _euid() == 0:
         if os.path.realpath(requested) != os.path.realpath(DEFAULT_QUARANTINE_DIR) or os.path.islink(
             DEFAULT_QUARANTINE_DIR
         ):
@@ -3058,6 +3462,14 @@ def _validate_clamscan_pid(pid: int) -> None:
     """Verify pid exists and belongs to a legitimate clamscan process."""
     if not isinstance(pid, int) or pid <= 1:
         raise ValueError(f"Invalid PID: {pid}")
+    if IS_WINDOWS:
+        with _SPAWNED_PROCS_LOCK:
+            spawned = _SPAWNED_PROCS.get(pid)
+        if (spawned is not None and spawned.poll() is None) or any(
+            p["pid"] == pid for p in _discover_windows_clamscan_processes()
+        ):
+            return
+        raise ProcessLookupError(f"Process {pid} no longer exists")
     comm_path = f"/proc/{pid}/comm"
     if not os.path.exists(comm_path):
         raise ProcessLookupError(f"Process {pid} no longer exists")
@@ -3072,7 +3484,7 @@ def _validate_clamscan_pid(pid: int) -> None:
     if exe_target:
         if os.path.basename(exe_target) != "clamscan":
             raise PermissionError(f"PID {pid} executable is '{exe_target}', not 'clamscan'")
-        if os.geteuid() == 0 and not _is_secure_root_owned_path(exe_target):
+        if _euid() == 0 and not _is_secure_root_owned_path(exe_target):
             raise PermissionError(f"PID {pid} executable is not root-owned/secure: {exe_target}")
 
 
@@ -3154,12 +3566,12 @@ def _read_log_chunk(log_path: str, log_offset: int, max_bytes: int = 1048576) ->
 
 
 def _helper_ping(_params: dict[str, Any]) -> dict[str, Any]:
-    return {"uid": os.geteuid(), "pid": os.getpid()}
+    return {"uid": _euid(), "pid": os.getpid()}
 
 
 def _ensure_log_readable(log_path: str) -> None:
     """Make validated log_path readable (0644) by unprivileged users when running as root."""
-    if not log_path or os.geteuid() != 0:
+    if IS_WINDOWS or not log_path or _euid() != 0:
         return
     try:
         safe_path = _validate_helper_log_path(log_path)
@@ -3374,23 +3786,59 @@ def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
         )
 
     proc_info: dict[str, Any] = {"alive": False}
-    if isinstance(pid, int) and pid > 1 and os.path.exists(f"/proc/{pid}"):
-        proc_info = {
-            "alive": True,
-            "io": _inspect_proc_io(pid),
-            **_inspect_proc_fds(pid),
-        }
+    if isinstance(pid, int) and pid > 1 and _is_pid_running(pid):
+        if IS_WINDOWS:
+            proc_info = {
+                "alive": True,
+                "io": _win32_get_io_counters(pid),
+                "current_file": None,
+                "open_files": [],
+                "tmp_count": 0,
+                "fd_error": None,
+            }
+        else:
+            proc_info = {
+                "alive": True,
+                "io": _inspect_proc_io(pid),
+                **_inspect_proc_fds(pid),
+            }
 
     log_info = _read_log_chunk(log_path, log_offset)
     return {"proc": proc_info, "log": log_info, "precount": precount_snap}
 
 
-_SPAWNED_PROCS_LOCK = threading.Lock()
-_SPAWNED_PROCS: dict[int, subprocess.Popen[Any]] = {}
-
-
 def _terminate_pid_gracefully(pid: int, force_cont: bool = False) -> None:
-    """Terminate pid even if SIGSTOP-paused, escalating to SIGKILL and waiting for exit."""
+    """Terminate pid even if paused, escalating to force kill and waiting for exit."""
+    if IS_WINDOWS:
+        with _SPAWNED_PROCS_LOCK:
+            was_paused = force_cont or (pid in _WINDOWS_PAUSED_PIDS)
+            _WINDOWS_PAUSED_PIDS.discard(pid)
+            spawned = _SPAWNED_PROCS.get(pid)
+        if was_paused:
+            try:
+                _win32_suspend_resume(pid, suspend=False)
+            except (ProcessLookupError, OSError):
+                pass
+        if spawned is not None:
+            try:
+                spawned.terminate()
+                spawned.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    spawned.kill()
+                    spawned.wait(timeout=1.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if _win32_is_pid_running(pid):
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+                creationflags=_SUBPROCESS_NO_WINDOW,
+            )
+        return
+
     stat_before = parse_proc_stat(pid)
     was_paused = force_cont or bool(stat_before and stat_before.get("state") == "T")
     try:
@@ -3431,9 +3879,10 @@ def _terminate_pid_gracefully(pid: int, force_cont: bool = False) -> None:
 
 
 def _reap_spawned_proc(pid: int) -> None:
-    """Wait synchronously for a helper-spawned process to exit so /proc/<pid> is gone."""
+    """Wait synchronously for a helper-spawned process to exit so PID disappears."""
     with _SPAWNED_PROCS_LOCK:
         proc = _SPAWNED_PROCS.get(pid)
+        _WINDOWS_PAUSED_PIDS.discard(pid)
     if proc is not None:
         try:
             proc.wait(timeout=2.0)
@@ -3441,6 +3890,7 @@ def _reap_spawned_proc(pid: int) -> None:
             pass
         with _SPAWNED_PROCS_LOCK:
             _SPAWNED_PROCS.pop(pid, None)
+            _SPAWNED_PROCS_META.pop(pid, None)
 
 
 def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
@@ -3450,6 +3900,21 @@ def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
     if sig_name not in allowed:
         raise ValueError(f"Unsupported signal: {sig_name}")
     _validate_clamscan_pid(pid)
+    if IS_WINDOWS:
+        if sig_name == "SIGSTOP":
+            _win32_suspend_resume(pid, suspend=True)
+            with _SPAWNED_PROCS_LOCK:
+                _WINDOWS_PAUSED_PIDS.add(pid)
+        elif sig_name == "SIGCONT":
+            _win32_suspend_resume(pid, suspend=False)
+            with _SPAWNED_PROCS_LOCK:
+                _WINDOWS_PAUSED_PIDS.discard(pid)
+        else:
+            cancel_background_precount()
+            _terminate_pid_gracefully(pid, force_cont=True)
+            _reap_spawned_proc(pid)
+        return {"pid": pid, "sig": sig_name}
+
     if sig_name == "SIGTERM":
         cancel_background_precount()
         _terminate_pid_gracefully(pid)
@@ -3481,6 +3946,10 @@ def _helper_set_priority(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported priority mode: {mode}")
     _validate_clamscan_pid(pid)
 
+    if IS_WINDOWS:
+        _win32_set_priority(pid, mode)
+        return {"pid": pid, "mode": mode, "renice": f"win32:{mode}"}
+
     nice_val, io_class, io_level = profiles[mode]
     renice_res = subprocess.run(
         ["renice", "-n", nice_val, "-p", str(pid)],
@@ -3511,19 +3980,23 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
     if not cmd_args:
         raise ValueError("cmd_args cannot be empty")
     raw_exe = str(cmd_args[0])
-    if "\x00" in raw_exe or os.path.basename(raw_exe) != "clamscan":
+    allowed_exe_names = ("clamscan", "clamscan.exe")
+    if "\x00" in raw_exe or os.path.basename(raw_exe).lower() not in allowed_exe_names:
         raise PermissionError("Only clamscan may be launched")
 
     if os.path.isabs(raw_exe):
         resolved_exe = os.path.realpath(raw_exe)
-        if os.path.basename(resolved_exe) != "clamscan":
+        if os.path.basename(resolved_exe).lower() not in allowed_exe_names:
             raise PermissionError("Only clamscan may be launched")
     else:
-        resolved_exe = shutil.which("clamscan") or "/usr/bin/clamscan"
+        resolved_exe = _find_binary_path(
+            "clamscan",
+            tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs()) if IS_WINDOWS else ("/usr/bin/clamscan",),
+        ) or ("clamscan.exe" if IS_WINDOWS else "/usr/bin/clamscan")
         if os.path.exists(resolved_exe):
             resolved_exe = os.path.realpath(resolved_exe)
 
-    if os.geteuid() == 0:
+    if (not IS_WINDOWS) and _euid() == 0:
         trusted_dirs = ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/")
         if not resolved_exe.startswith(trusted_dirs) or not _is_secure_root_owned_path(resolved_exe):
             raise PermissionError(f"Refusing untrusted clamscan binary: {resolved_exe}")
@@ -3531,8 +4004,11 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
     validated: list[str] = [resolved_exe]
     simple_flags = {"-r", "--recursive", "-i", "--infected", "--no-summary"}
     size_re = re.compile(r"^\d+[KMG]?$", re.IGNORECASE)
-    for arg in cmd_args[1:]:
-        s = str(arg)
+    args_list = list(cmd_args[1:])
+    idx = 0
+    while idx < len(args_list):
+        s = str(args_list[idx])
+        idx += 1
         if not s or "\x00" in s:
             raise ValueError("Invalid clamscan argument")
         if s in simple_flags:
@@ -3545,6 +4021,21 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
             validated.append(s)
         elif s.startswith("--max-scansize=") and size_re.match(s.split("=", 1)[1]):
             validated.append(s)
+        elif s.startswith("--database="):
+            if (not IS_WINDOWS) and _euid() == 0:
+                raise PermissionError(f"Unsupported or disallowed clamscan flag: {s}")
+            db_arg = s.split("=", 1)[1].strip()
+            if not db_arg or "\x00" in db_arg or not os.path.isabs(db_arg):
+                raise ValueError(f"Database path must be absolute: {db_arg}")
+            validated.append(f"--database={db_arg}")
+        elif s == "-d" and idx < len(args_list):
+            if (not IS_WINDOWS) and _euid() == 0:
+                raise PermissionError(f"Unsupported or disallowed clamscan flag: {s}")
+            db_arg = str(args_list[idx]).strip()
+            idx += 1
+            if not db_arg or "\x00" in db_arg or not os.path.isabs(db_arg):
+                raise ValueError(f"Database path must be absolute: {db_arg}")
+            validated.append(f"--database={db_arg}")
         elif s.startswith("--log="):
             safe_log = _validate_helper_log_path(s.split("=", 1)[1])
             validated.append(f"--log={safe_log}")
@@ -3578,11 +4069,12 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
             os.makedirs(parent_dir, exist_ok=True)
         if os.path.islink(log_path):
             raise PermissionError(f"Refusing symlink log path: {log_path}")
+        nofol = getattr(os, "O_NOFOLLOW", 0)
         if truncate_log and os.path.exists(log_path):
-            fd = os.open(log_path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            fd = os.open(log_path, os.O_WRONLY | os.O_TRUNC | nofol, 0o644)
             os.close(fd)
         elif not os.path.exists(log_path):
-            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644)
+            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | nofol, 0o644)
             os.close(fd)
         _ensure_log_readable(log_path)
 
@@ -3596,16 +4088,25 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
             stdout_target = subprocess.DEVNULL
             stderr_target = subprocess.DEVNULL
 
-        proc = subprocess.Popen(
-            cmd_args,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_target,
-            stderr=stderr_target,
-            start_new_session=True,
-            close_fds=True,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": stdout_target,
+            "stderr": stderr_target,
+            "close_fds": not IS_WINDOWS,
+        }
+        if IS_WINDOWS:
+            popen_kwargs["creationflags"] = _SUBPROCESS_NO_WINDOW
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(cmd_args, **popen_kwargs)
         with _SPAWNED_PROCS_LOCK:
             _SPAWNED_PROCS[proc.pid] = proc
+            _SPAWNED_PROCS_META[proc.pid] = {
+                "cmdline": cmd_args,
+                "start_time": time.monotonic(),
+                "log_path": log_path,
+            }
 
         def _wait_and_cleanup(p: subprocess.Popen[Any] = proc) -> None:
             try:
@@ -3613,6 +4114,8 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
             finally:
                 with _SPAWNED_PROCS_LOCK:
                     _SPAWNED_PROCS.pop(p.pid, None)
+                    _SPAWNED_PROCS_META.pop(p.pid, None)
+                    _WINDOWS_PAUSED_PIDS.discard(p.pid)
 
         # Reap exited child clamscan asynchronously so helper never leaves Z-state zombies.
         threading.Thread(target=_wait_and_cleanup, daemon=True).start()
@@ -3623,8 +4126,118 @@ def _helper_start_scan(params: dict[str, Any]) -> dict[str, Any]:
     return {"pid": proc.pid, "cmd": cmd_args, "log_path": log_path}
 
 
+def _has_clamav_db_files(db_dir: str) -> bool:
+    """Return True if db_dir contains at least one non-empty .cvd/.cld signature database."""
+    if not db_dir or not os.path.isdir(db_dir):
+        return False
+    try:
+        for name in os.listdir(db_dir):
+            if name.endswith((".cvd", ".cld")):
+                full = os.path.join(db_dir, name)
+                if os.path.isfile(full) and os.path.getsize(full) > 0:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _default_db_dir() -> str:
+    """Return platform-appropriate ClamAV virus signature directory."""
+    if not IS_WINDOWS:
+        return "/var/lib/clamav"
+    prog_data = os.environ.get("ProgramData") or r"C:\ProgramData"
+    candidates = [os.path.join(prog_data, "ClamAV", "db")]
+    for d in _win_clamav_dirs():
+        candidates.append(os.path.join(d, "database"))
+        candidates.append(os.path.join(d, "db"))
+    candidates.append(str(APP_DATA_DIR / "database"))
+    for c in candidates:
+        if _has_clamav_db_files(c):
+            return c
+    return str(APP_DATA_DIR / "database")
+
+
+def _is_dir_writable(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        fd, probe = tempfile.mkstemp(prefix=".write_test_", dir=path)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _ensure_windows_freshclam_config(freshclam_bin: str | None = None) -> tuple[str, str]:
+    """Ensure a valid, writable freshclam.conf and database dir exist on Windows."""
+    app_db = str(APP_DATA_DIR / "database")
+    db_candidates: list[str] = []
+    if freshclam_bin:
+        db_candidates.append(os.path.join(os.path.dirname(freshclam_bin), "database"))
+    for d in _win_clamav_dirs():
+        db_candidates.append(os.path.join(d, "database"))
+    db_dir = app_db
+    for cand in db_candidates:
+        if _has_clamav_db_files(cand) and _is_dir_writable(cand):
+            db_dir = cand
+            break
+    else:
+        if freshclam_bin:
+            install_db = os.path.join(os.path.dirname(freshclam_bin), "database")
+            if _is_dir_writable(install_db):
+                db_dir = install_db
+    os.makedirs(db_dir, exist_ok=True)
+
+    conf_path = str(APP_DATA_DIR / "freshclam.conf")
+    if freshclam_bin:
+        install_dir = os.path.dirname(freshclam_bin)
+        install_conf = os.path.join(install_dir, "freshclam.conf")
+        if _is_dir_writable(install_dir) and (
+            not os.path.exists(install_conf) or os.access(install_conf, os.W_OK)
+        ):
+            conf_path = install_conf
+
+    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
+    lines: list[str] = []
+    has_mirror = False
+    has_dbdir = False
+    if os.path.isfile(conf_path):
+        try:
+            with open(conf_path, "r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    stripped = raw.strip()
+                    if stripped.lower() == "example":
+                        lines.append("# Example (disabled automatically by ClamAV Security Center)\n")
+                        continue
+                    if stripped.startswith("DatabaseMirror "):
+                        has_mirror = True
+                    elif stripped.startswith("DatabaseDirectory "):
+                        has_dbdir = True
+                    lines.append(raw)
+        except OSError:
+            lines = []
+    if not lines:
+        lines = [
+            "# Generated automatically by ClamAV Security Center\n",
+            "DatabaseMirror database.clamav.net\n",
+            f'DatabaseDirectory "{db_dir}"\n',
+            "Checks 24\n",
+        ]
+    else:
+        if not has_mirror:
+            lines.append("DatabaseMirror database.clamav.net\n")
+        if not has_dbdir:
+            lines.append(f'DatabaseDirectory "{db_dir}"\n')
+
+    with open(conf_path, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    return conf_path, db_dir
+
+
 def _detect_freshclam_services() -> tuple[list[str], str]:
     """Detect active/installed freshclam systemd unit across RHEL and openSUSE."""
+    if IS_WINDOWS:
+        return [], "manual"
     candidates = ("clamav-freshclam.service", "freshclam.service", "freshclam.timer")
     active_units: list[str] = []
     any_known_status = "inactive"
@@ -3649,15 +4262,39 @@ def _detect_freshclam_services() -> tuple[list[str], str]:
 
 
 def _helper_run_freshclam(_params: dict[str, Any]) -> dict[str, Any]:
-    freshclam_bin = shutil.which("freshclam") or "/usr/sbin/freshclam"
-    if not os.path.exists(freshclam_bin):
-        freshclam_bin = "/usr/local/bin/freshclam"
-    if not os.path.exists(freshclam_bin):
+    win_candidates = tuple(os.path.join(d, "freshclam.exe") for d in _win_clamav_dirs()) if IS_WINDOWS else ()
+    freshclam_bin = _find_binary_path(
+        "freshclam",
+        (*win_candidates, "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
+        if not IS_WINDOWS
+        else win_candidates,
+    )
+    if not freshclam_bin or not os.path.exists(freshclam_bin):
         raise FileNotFoundError("freshclam binary not found")
+
+    if IS_WINDOWS:
+        conf_path, db_dir = _ensure_windows_freshclam_config(freshclam_bin)
+        update_res = subprocess.run(
+            [freshclam_bin, f"--config-file={conf_path}", f"--datadir={db_dir}"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
+        )
+        notes = [f"Config: {conf_path}", f"Database: {db_dir}"]
+        combined = "\n".join(
+            part for part in [*notes, update_res.stdout.strip(), update_res.stderr.strip()] if part
+        )
+        return {
+            "success": update_res.returncode == 0,
+            "returncode": update_res.returncode,
+            "output": combined,
+        }
 
     active_units, _ = _detect_freshclam_services()
     service_units = [u for u in active_units if u.endswith(".service")]
-    notes: list[str] = []
+    notes = []
     stopped_units: list[str] = []
 
     for unit in service_units:
@@ -3740,9 +4377,10 @@ def _helper_quarantine_file(params: dict[str, Any]) -> dict[str, Any]:
     os.makedirs(qdir, mode=0o700, exist_ok=True)
     if os.path.islink(qdir):
         raise PermissionError(f"Refusing symlink quarantine directory: {qdir}")
-    if os.geteuid() == 0 and os.lstat(qdir).st_uid != 0:
+    if (not IS_WINDOWS) and _euid() == 0 and os.lstat(qdir).st_uid != 0:
         raise PermissionError(f"Quarantine directory must be owned by root: {qdir}")
-    os.chmod(qdir, 0o700)
+    if not IS_WINDOWS:
+        os.chmod(qdir, 0o700)
 
     try:
         file_size = os.path.getsize(src) if os.path.isfile(src) and not os.path.islink(src) else 0
@@ -3816,8 +4454,11 @@ def _helper_list_quarantine(params: dict[str, Any]) -> dict[str, Any]:
 
 def _ensure_no_symlink_ancestors_and_mkdir(directory: str) -> None:
     """Create missing directories along an absolute path while rejecting any symlink ancestor."""
-    cur = Path("/")
-    for part in Path(os.path.abspath(directory)).parts[1:]:
+    parts = Path(os.path.abspath(directory)).parts
+    if not parts:
+        return
+    cur = Path(parts[0])
+    for part in parts[1:]:
         cur = cur / part
         if cur.is_symlink():
             raise PermissionError(f"Refusing to restore across symlink directory: {cur}")
@@ -3843,7 +4484,7 @@ def _helper_restore_quarantine(params: dict[str, Any]) -> dict[str, Any]:
         raise PermissionError(f"Refusing to restore into protected system path: {dest}")
 
     invoker = _resolve_invoking_username()
-    if os.geteuid() == 0 and requested_dest and requested_dest != orig_path:
+    if (not IS_WINDOWS) and _euid() == 0 and requested_dest and requested_dest != orig_path:
         # Custom destination overrides may only restore into the invoking user's home or recorded path
         if not invoker or not os.path.realpath(requested_dest).startswith(f"/home/{invoker}/"):
             raise PermissionError("Custom restore destination must stay inside caller's home directory.")
@@ -3856,7 +4497,7 @@ def _helper_restore_quarantine(params: dict[str, Any]) -> dict[str, Any]:
         _ensure_no_symlink_ancestors_and_mkdir(parent)
 
     shutil.move(src, dest)
-    if dest.startswith("/home/"):
+    if (not IS_WINDOWS) and dest.startswith("/home/") and pwd is not None:
         parts = Path(dest).parts
         if len(parts) >= 3:
             target_user = parts[2]
@@ -3899,6 +4540,8 @@ def _helper_delete_file(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _helper_install_polkit_rule(params: dict[str, Any]) -> dict[str, Any]:
+    if IS_WINDOWS or pwd is None:
+        return {"rule_path": "", "username": ""}
     invoker = _resolve_invoking_username()
     username = invoker or str(params.get("username") or "").strip()
     if not username:
@@ -3907,7 +4550,7 @@ def _helper_install_polkit_rule(params: dict[str, Any]) -> dict[str, Any]:
         raise PermissionError("Polkit rule can only be installed for the invoking user")
     pwd.getpwnam(username)
 
-    if os.geteuid() == 0:
+    if _euid() == 0:
         if not _is_secure_root_owned_path(SCRIPT_PATH):
             raise PermissionError(
                 f"Refusing to install passwordless Polkit rule for user-writable script: {SCRIPT_PATH}"
@@ -3938,7 +4581,133 @@ def _helper_install_polkit_rule(params: dict[str, Any]) -> dict[str, Any]:
     return {"rule_path": POLKIT_RULE_PATH, "username": username}
 
 
+def _helper_windows_get_schedule() -> dict[str, Any]:
+    """Read scheduled ClamAV scan settings and Task Scheduler next-run info on Windows."""
+    cfg: dict[str, Any] = {
+        "frequency": "weekly",
+        "day_of_week": "Sun",
+        "time_of_day": "03:00",
+        "scan_type": "quick",
+        "enabled": False,
+    }
+    saved = load_json_file(WINDOWS_SCHEDULE_CONFIG_PATH, {})
+    if isinstance(saved, dict):
+        cfg.update(saved)
+
+    enabled = bool(cfg.get("enabled"))
+    next_run = "-"
+    try:
+        res = subprocess.run(
+            ["schtasks", "/Query", "/TN", WINDOWS_TASK_NAME, "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            rows = list(csv.reader(res.stdout.splitlines()))
+            if rows and len(rows[0]) >= 3:
+                enabled = True
+                next_run = rows[0][1].strip() or "-"
+        else:
+            enabled = False
+    except OSError:
+        pass
+    cfg["enabled"] = enabled
+    return {"enabled": enabled, "next_run": next_run, **cfg}
+
+
+def _helper_windows_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
+    """Create, update, or remove the Windows Task Scheduler ClamAV scan task."""
+    enabled = bool(params.get("enabled", False))
+    day_map = {
+        "monday": ("Mon", "MON"),
+        "mon": ("Mon", "MON"),
+        "tuesday": ("Tue", "TUE"),
+        "tue": ("Tue", "TUE"),
+        "wednesday": ("Wed", "WED"),
+        "wed": ("Wed", "WED"),
+        "thursday": ("Thu", "THU"),
+        "thu": ("Thu", "THU"),
+        "friday": ("Fri", "FRI"),
+        "fri": ("Fri", "FRI"),
+        "saturday": ("Sat", "SAT"),
+        "sat": ("Sat", "SAT"),
+        "sunday": ("Sun", "SUN"),
+        "sun": ("Sun", "SUN"),
+    }
+    freq = "weekly" if str(params.get("frequency") or "weekly").lower() == "weekly" else "daily"
+    day3, win_day = day_map.get(str(params.get("day_of_week") or "Sun").strip().lower(), ("Sun", "SUN"))
+    parts = str(params.get("time_of_day") or "03:00").strip().split(":")
+    try:
+        hh = max(0, min(23, int(parts[0])))
+        mm = max(0, min(59, int(parts[1]))) if len(parts) > 1 else 0
+    except ValueError:
+        hh, mm = 3, 0
+    time_norm = f"{hh:02d}:{mm:02d}"
+    stype = "full" if str(params.get("scan_type") or "quick").lower() == "full" else "quick"
+
+    cfg = {
+        "enabled": enabled,
+        "frequency": freq,
+        "day_of_week": day3,
+        "time_of_day": time_norm,
+        "scan_type": stype,
+    }
+    save_json_file(WINDOWS_SCHEDULE_CONFIG_PATH, cfg)
+
+    if not enabled:
+        subprocess.run(
+            ["schtasks", "/Delete", "/TN", WINDOWS_TASK_NAME, "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=_SUBPROCESS_NO_WINDOW,
+        )
+        return _helper_windows_get_schedule()
+
+    clamscan_bin = _find_binary_path(
+        "clamscan", tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs())
+    ) or "clamscan.exe"
+    quick_targets = [str(p) for p in (params.get("quick_targets") or []) if os.path.exists(str(p))]
+    targets = [_system_root_target()] if stype == "full" else (quick_targets or get_quick_scan_targets())
+    db_flag = f'--database="{_default_db_dir()}" ' if _has_clamav_db_files(_default_db_dir()) else ""
+    quoted_targets = " ".join(f'"{t}"' for t in targets)
+    cmd_script = APP_DATA_DIR / "scheduled-scan.cmd"
+    cmd_script.parent.mkdir(parents=True, exist_ok=True)
+    cmd_script.write_text(
+        f'@echo off\r\n"{clamscan_bin}" -r {db_flag}--max-filesize=100M --max-scansize=100M '
+        f'--log="{DEFAULT_LOG_PATH}" {quoted_targets}\r\n',
+        encoding="utf-8",
+    )
+
+    sch_cmd = [
+        "schtasks",
+        "/Create",
+        "/TN",
+        WINDOWS_TASK_NAME,
+        "/F",
+        "/SC",
+        "WEEKLY" if freq == "weekly" else "DAILY",
+    ]
+    if freq == "weekly":
+        sch_cmd.extend(["/D", win_day])
+    sch_cmd.extend(["/ST", time_norm, "/TR", f'"{cmd_script}"'])
+    res = subprocess.run(
+        sch_cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=_SUBPROCESS_NO_WINDOW,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip() or res.stdout.strip() or "Failed creating scheduled Windows task")
+    return _helper_windows_get_schedule()
+
+
 def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
+    if IS_WINDOWS:
+        return _helper_windows_get_schedule()
     cfg: dict[str, Any] = {
         "frequency": "weekly",
         "day_of_week": "Sun",
@@ -3986,6 +4755,8 @@ def _helper_get_schedule(_params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _helper_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
+    if IS_WINDOWS:
+        return _helper_windows_set_schedule(params)
     enabled = bool(params.get("enabled", False))
     frequency = str(params.get("frequency") or "weekly")
     day_of_week = str(params.get("day_of_week") or "Sun")
@@ -4042,7 +4813,7 @@ HELPER_HANDLERS = {
 
 def run_helper() -> int:
     """Run headless JSON-over-stdin/stdout privileged helper."""
-    print(json.dumps({"type": "ready", "uid": os.geteuid()}), flush=True)
+    print(json.dumps({"type": "ready", "uid": _euid()}), flush=True)
     for raw_line in sys.stdin:
         line = raw_line.strip()
         if not line or not line.startswith("{"):
@@ -4118,12 +4889,13 @@ def run_self_test() -> int:
 
     print("[self-test] Testing --helper JSON protocol...")
     helper_proc = subprocess.Popen(
-        [sys.executable, SCRIPT_PATH, "--helper"],
+        _self_helper_cmd(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        creationflags=_SUBPROCESS_NO_WINDOW,
     )
     try:
         assert helper_proc.stdout is not None and helper_proc.stdin is not None
@@ -4139,7 +4911,7 @@ def run_self_test() -> int:
 
         test_log_path = SCRIPT_PATH
         cleanup_test_log = False
-        if os.geteuid() == 0:
+        if _is_posix_root():
             # Root helper confines log reads to /var/log/clam*.log; stage an ephemeral log there.
             if os.path.isdir("/var/log") and os.access("/var/log", os.W_OK):
                 test_log_path = os.path.join("/var/log", f"clamav-selftest-{os.getpid()}.log")
@@ -4195,7 +4967,7 @@ class HelperClient:
 
     @property
     def is_connected(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None and self.uid == 0
+        return self._proc is not None and self._proc.poll() is None and (self.uid == 0 or IS_WINDOWS)
 
     def close(self) -> None:
         with self._lock:
@@ -4223,24 +4995,46 @@ class HelperClient:
                         pass
 
     def _spawn_auth_process(self, cmd: list[str]) -> tuple[subprocess.Popen[str] | None, str]:
-        """Spawn a privileged auth wrapper process cleanly, handling missing binaries."""
+        """Spawn a helper or auth wrapper process cleanly, handling missing binaries."""
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            popen_kwargs: dict[str, Any] = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "bufsize": 1,
+            }
+            if IS_WINDOWS:
+                popen_kwargs["creationflags"] = _SUBPROCESS_NO_WINDOW
+            proc = subprocess.Popen(cmd, **popen_kwargs)
             return proc, ""
         except OSError as exc:
             return None, f"Failed to launch {cmd[0]}: {exc}"
 
+    def start_local(self) -> tuple[bool, str]:
+        """Spawn the local JSON-RPC helper directly without sudo or pkexec."""
+        self.close()
+        proc, spawn_err = self._spawn_auth_process(_self_helper_cmd())
+        if proc is None:
+            return False, spawn_err
+        assert proc.stdout is not None
+        line = proc.stdout.readline()
+        if line.strip().startswith("{"):
+            try:
+                msg = json.loads(line.strip())
+                if msg.get("type") == "ready":
+                    self._attach(proc, int(msg.get("uid", 0)))
+                    return True, "Local helper active."
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+        return False, "Local helper did not report ready."
+
     def start_with_sudo(self, password: str) -> tuple[bool, str]:
         """Spawn helper using sudo -k -S and validate root readiness."""
         self.close()
-        cmd = ["sudo", "-k", "-S", "-p", "", sys.executable, SCRIPT_PATH, "--helper"]
+        cmd = ["sudo", "-k", "-S", "-p", "", *_self_helper_cmd()]
         proc, spawn_err = self._spawn_auth_process(cmd)
         if proc is None:
             return False, spawn_err
@@ -4326,7 +5120,7 @@ class HelperClient:
     def start_with_sudo_nopass(self) -> tuple[bool, str]:
         """Attempt non-interactive sudo -n helper launch if credentials are cached or NOPASSWD."""
         self.close()
-        cmd = ["sudo", "-n", sys.executable, SCRIPT_PATH, "--helper"]
+        cmd = ["sudo", "-n", *_self_helper_cmd()]
         proc, spawn_err = self._spawn_auth_process(cmd)
         if proc is None:
             return False, spawn_err
@@ -4347,7 +5141,7 @@ class HelperClient:
     def start_with_pkexec(self) -> tuple[bool, str]:
         """Spawn helper via pkexec (triggers KDE Polkit prompt)."""
         self.close()
-        cmd = ["pkexec", sys.executable, SCRIPT_PATH, "--helper"]
+        cmd = ["pkexec", *_self_helper_cmd()]
         proc, spawn_err = self._spawn_auth_process(cmd)
         if proc is None:
             return False, spawn_err
@@ -4449,44 +5243,57 @@ def _find_binary_path(name: str, fallbacks: tuple[str, ...] = ()) -> str | None:
     return None
 
 
-def check_system_dependencies(db_dir: str = "/var/lib/clamav") -> dict[str, Any]:
+def check_system_dependencies(db_dir: str | None = None) -> dict[str, Any]:
     """Check installed ClamAV binaries, virus database files, and supporting system tools."""
-    clamscan_path = _find_binary_path("clamscan", ("/usr/bin/clamscan", "/usr/sbin/clamscan"))
-    freshclam_path = _find_binary_path(
-        "freshclam", ("/usr/bin/freshclam", "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
+    resolved_db_dir = db_dir if db_dir is not None else _default_db_dir()
+    clamscan_fallbacks = (
+        tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs())
+        if IS_WINDOWS
+        else ("/usr/bin/clamscan", "/usr/sbin/clamscan")
     )
+    freshclam_fallbacks = (
+        tuple(os.path.join(d, "freshclam.exe") for d in _win_clamav_dirs())
+        if IS_WINDOWS
+        else ("/usr/bin/freshclam", "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
+    )
+    clamscan_path = _find_binary_path("clamscan", clamscan_fallbacks)
+    freshclam_path = _find_binary_path("freshclam", freshclam_fallbacks)
 
     tools: dict[str, bool] = {
         "clamscan": clamscan_path is not None,
         "freshclam": freshclam_path is not None,
-        "pkexec": _find_binary_path("pkexec") is not None,
-        "sudo": _find_binary_path("sudo") is not None,
-        "find": _find_binary_path("find") is not None,
-        "renice": _find_binary_path("renice") is not None,
-        "ionice": _find_binary_path("ionice") is not None,
-        "systemctl": _find_binary_path("systemctl") is not None,
-        "notify-send": _find_binary_path("notify-send") is not None,
+        "pkexec": False if IS_WINDOWS else (_find_binary_path("pkexec") is not None),
+        "sudo": False if IS_WINDOWS else (_find_binary_path("sudo") is not None),
+        "find": True if IS_WINDOWS else (_find_binary_path("find") is not None),
+        "renice": True if IS_WINDOWS else (_find_binary_path("renice") is not None),
+        "ionice": True if IS_WINDOWS else (_find_binary_path("ionice") is not None),
+        "systemctl": (_find_binary_path("schtasks") is not None) if IS_WINDOWS else (_find_binary_path("systemctl") is not None),
+        "notify-send": True if IS_WINDOWS else (_find_binary_path("notify-send") is not None),
     }
 
     db_files: list[str] = []
-    if os.path.isdir(db_dir):
+    if os.path.isdir(resolved_db_dir):
         try:
-            for name in os.listdir(db_dir):
+            for name in os.listdir(resolved_db_dir):
                 if name.endswith((".cvd", ".cld")):
-                    full = os.path.join(db_dir, name)
+                    full = os.path.join(resolved_db_dir, name)
                     if os.path.isfile(full) and os.path.getsize(full) > 0:
                         db_files.append(name)
         except OSError:
             pass
 
     missing_required = [pkg for pkg in ("clamscan", "freshclam") if not tools[pkg]]
-    if not tools["pkexec"] and not tools["sudo"]:
+    if (not IS_WINDOWS) and not tools["pkexec"] and not tools["sudo"]:
         missing_required.append("pkexec/sudo")
-    missing_optional = [
-        tool
-        for tool in ("pkexec", "sudo", "find", "renice", "ionice", "systemctl", "notify-send")
-        if not tools[tool]
-    ]
+    missing_optional = (
+        []
+        if IS_WINDOWS
+        else [
+            tool
+            for tool in ("pkexec", "sudo", "find", "renice", "ionice", "systemctl", "notify-send")
+            if not tools[tool]
+        ]
+    )
 
     return {
         "clamscan_path": clamscan_path,
@@ -4495,14 +5302,14 @@ def check_system_dependencies(db_dir: str = "/var/lib/clamav") -> dict[str, Any]
         "has_freshclam": tools["freshclam"],
         "has_virus_db": len(db_files) > 0,
         "db_files_count": len(db_files),
-        "db_dir": db_dir,
+        "db_dir": resolved_db_dir,
         "tools": tools,
         "missing_required": missing_required,
         "missing_optional": missing_optional,
     }
 
 
-def get_clamav_metadata(db_dir: str = "/var/lib/clamav") -> dict[str, Any]:
+def get_clamav_metadata(db_dir: str | None = None) -> dict[str, Any]:
     """Read ClamAV version, freshclam service state, dependency health, and virus DB presence."""
     deps = check_system_dependencies(db_dir=db_dir)
     version = "Unavailable"
@@ -4514,6 +5321,7 @@ def get_clamav_metadata(db_dir: str = "/var/lib/clamav") -> dict[str, Any]:
                 text=True,
                 timeout=3,
                 check=False,
+                creationflags=_SUBPROCESS_NO_WINDOW,
             )
             if res.returncode == 0 and res.stdout.strip():
                 version = res.stdout.strip()
@@ -4586,7 +5394,9 @@ def _gdbus_show_items_command(path: str) -> list[str]:
 
 
 def build_reveal_file_command(path: str, desktop: str | None = None) -> list[str]:
-    """Build command to reveal and highlight a file in KDE Dolphin, GNOME Files, or fallback."""
+    """Build command to reveal and highlight a file in Explorer, KDE Dolphin, GNOME Files, or fallback."""
+    if IS_WINDOWS:
+        return ["explorer.exe", f"/select,{os.path.normpath(path)}"]
     de = desktop or detect_desktop_environment()
     if de == "kde" and shutil.which("dolphin"):
         return ["dolphin", "--select", path]
@@ -6114,7 +6924,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             target_row = QHBoxLayout()
             self.scan_target_combo = QComboBox()
             self.scan_target_combo.setEditable(True)
-            self.scan_target_combo.addItems(["/", os.path.expanduser("~"), "/tmp", "/var"])
+            default_targets = (
+                [_system_root_target(), os.path.expanduser("~"), tempfile.gettempdir()]
+                if IS_WINDOWS
+                else ["/", os.path.expanduser("~"), "/tmp", "/var"]
+            )
+            self.scan_target_combo.addItems(default_targets)
             self.scan_target_combo.currentTextChanged.connect(self._update_command_preview)
             target_row.addWidget(self.scan_target_combo, 1)
             browse_btn = self._reg_text(QPushButton(), "browse_btn")
@@ -6129,7 +6944,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self.opt_infected_only = self._reg_text(QCheckBox(), "opt_infected_only")
             self.opt_infected_only.setChecked(False)
             self.opt_exclude_virtual = self._reg_text(QCheckBox(), "opt_exclude_virtual")
-            self.opt_exclude_virtual.setChecked(True)
+            self.opt_exclude_virtual.setChecked(not IS_WINDOWS)
             self.opt_cross_fs = self._reg_text(QCheckBox(), "opt_cross_fs")
             self.opt_cross_fs.setChecked(False)
             for chk in (self.opt_recursive, self.opt_infected_only, self.opt_exclude_virtual, self.opt_cross_fs):
@@ -6467,7 +7282,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 if self.helper.is_connected:
                     self.hero_title_lbl.setText(self._tr("hero_scanning_title", pct=self._last_pct))
                     cur_file = self.current_file_edit.text().strip()
-                    short_file = os.path.basename(cur_file) if cur_file.startswith("/") else cur_file
+                    short_file = os.path.basename(cur_file) if os.path.isabs(cur_file) else cur_file
                     self.hero_sub_lbl.setText(
                         self._tr("hero_scanning_sub", eta=self._last_eta_str, file=short_file)
                     )
@@ -6484,7 +7299,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.tray_pause_act.setEnabled(False)
                 self.tray_stop_act.setEnabled(False)
             else:
-                can_ctrl = self.helper.is_connected or proc.get("uid") == os.getuid()
+                can_ctrl = self.helper.is_connected or proc.get("uid") == _uid()
                 self.tray_pause_act.setEnabled(can_ctrl)
                 self.tray_stop_act.setEnabled(can_ctrl)
                 if proc.get("state") == "T":
@@ -6502,7 +7317,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             proc = self._current_proc
             has_proc = proc is not None
             self.ctrl_box.setVisible(has_proc)
-            can_control = has_proc and (self.helper.is_connected or proc.get("uid") == os.getuid())
+            can_control = has_proc and (self.helper.is_connected or proc.get("uid") == _uid())
             self.pause_btn.setEnabled(can_control)
             self.stop_btn.setEnabled(can_control)
             self.bg_mode_chk.setEnabled(can_control or not has_proc)
@@ -6545,9 +7360,17 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if self.helper.is_connected:
                 return
             settings = load_json_file(SETTINGS_FILE_PATH, {})
-            has_polkit_rule = os.path.exists(POLKIT_RULE_PATH) or bool(settings.get("polkit_rule_installed"))
+            has_polkit_rule = (
+                (not IS_WINDOWS)
+                and (os.path.exists(POLKIT_RULE_PATH) or bool(settings.get("polkit_rule_installed")))
+            )
 
             def _auto_worker() -> None:
+                if IS_WINDOWS or _euid() == 0:
+                    ok_local, _ = self.helper.start_local()
+                    if ok_local:
+                        self.signals.auto_sudo_done.emit(True)
+                    return
                 ok_sudo, _ = self.helper.start_with_sudo_nopass()
                 if ok_sudo:
                     self.signals.auto_sudo_done.emit(True)
@@ -6684,7 +7507,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 if not label:
                     limits = parse_scan_targets_and_limits(selected["cmdline"])
                     t_str = ", ".join(limits["targets"])
-                    label = self._tr("label_full_scan") if t_str == "/" else self._tr("label_custom_scan", target=t_str)
+                    label = self._tr("label_full_scan") if t_str == _system_root_target() else self._tr("label_custom_scan", target=t_str)
                 self._last_active_scan = {
                     "pid": selected["pid"],
                     "label": label,
@@ -6789,7 +7612,19 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 )
 
         def _read_idle_schedule_display(self) -> str:
-            """Summarize systemd timer schedule cleanly without spawning elevated commands."""
+            """Summarize scheduled scan timer cleanly without spawning elevated commands."""
+            if IS_WINDOWS:
+                cfg = load_json_file(WINDOWS_SCHEDULE_CONFIG_PATH, {})
+                if not isinstance(cfg, dict) or not cfg.get("enabled"):
+                    return self._tr("idle_val_not_sched")
+                time_val = str(cfg.get("time_of_day") or "03:00")
+                if cfg.get("frequency") == "weekly":
+                    day_raw = str(cfg.get("day_of_week") or "Sun")
+                    day_key = f"day_{day_raw[:3].lower()}"
+                    day_name = self._tr(day_key) if day_key in TRANSLATIONS.get(self.lang, {}) else day_raw
+                    return f"{day_name[:3]} {time_val}"
+                return self._tr("idle_val_daily_at", time=time_val)
+
             if not os.path.exists(SYSTEMD_TIMER_PATH) or not os.access(SYSTEMD_TIMER_PATH, os.R_OK):
                 return self._tr("idle_val_not_sched")
             try:
@@ -6891,7 +7726,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             )
 
             cpu_pct_str = "..."
-            clk_tck = os.sysconf("SC_CLK_TCK")
+            clk_tck = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
             if self.telemetry.last_cpu_ticks is not None and self.telemetry.last_cpu_time is not None:
                 dt = now - self.telemetry.last_cpu_time
                 if dt > 0.2:
@@ -7284,7 +8119,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 new_args.append(arg)
 
             if not new_args:
-                new_args = ["clamscan", "-r", "/"]
+                new_args = ["clamscan", "-r", _system_root_target()]
 
             log_path = proc.get("log_path") or self.log_path_edit.text().strip() or DEFAULT_LOG_PATH
             prev_pid = proc["pid"]
@@ -7294,7 +8129,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 self.helper.call("signal_proc", {"pid": prev_pid, "sig": "SIGTERM"})
                 cancel_background_precount()
                 deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and os.path.exists(f"/proc/{prev_pid}"):
+                while time.monotonic() < deadline and _is_pid_running(prev_pid):
                     time.sleep(0.1)
 
                 res = self.helper.call(
@@ -7321,6 +8156,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         def _require_root_helper(self) -> bool:
             if self.helper.is_connected:
                 return True
+            if IS_WINDOWS:
+                ok, msg = self.helper.start_local()
+                if ok:
+                    self._on_root_unlocked()
+                    return True
+                QMessageBox.warning(self, self._tr("dlg_auth_failed"), msg)
+                return False
             box = QMessageBox(self)
             box.setWindowTitle(self._tr("dlg_root_req_title"))
             box.setText(self._tr("dlg_root_req_text"))
@@ -7350,7 +8192,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 return
             sig = "SIGCONT" if proc["state"] == "T" else "SIGSTOP"
             try:
-                if proc.get("uid") == os.getuid() and not self.helper.is_connected:
+                if (not IS_WINDOWS) and proc.get("uid") == _uid() and not self.helper.is_connected:
                     os.kill(proc["pid"], getattr(signal, sig))
                 else:
                     if not self._require_root_helper():
@@ -7378,7 +8220,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 return
             try:
                 stopped_pid = proc["pid"]
-                if proc.get("uid") == os.getuid() and not self.helper.is_connected:
+                if (not IS_WINDOWS) and proc.get("uid") == _uid() and not self.helper.is_connected:
                     _terminate_pid_gracefully(stopped_pid, force_cont=(proc.get("state") == "T"))
                 else:
                     if not self._require_root_helper():
@@ -7425,7 +8267,8 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if not sel:
                 return
             _, path, _ = sel
-            subprocess.Popen(build_reveal_file_command(path), start_new_session=True)
+            popen_kwargs: dict[str, Any] = {"creationflags": _SUBPROCESS_NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
+            subprocess.Popen(build_reveal_file_command(path), **popen_kwargs)
 
         _reveal_threat_in_file_manager = _reveal_threat_in_dolphin
 
@@ -7681,7 +8524,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 QMessageBox.warning(self, self._tr("sched_save_err"), str(exc))
 
         def _browse_scan_target(self) -> None:
-            chosen = QFileDialog.getExistingDirectory(self, self._tr("dlg_browse_dir"), "/")
+            chosen = QFileDialog.getExistingDirectory(self, self._tr("dlg_browse_dir"), _system_root_target())
             if chosen:
                 self.scan_target_combo.setCurrentText(chosen)
 
@@ -7691,7 +8534,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 args.append("-r")
             if self.opt_infected_only.isChecked():
                 args.append("-i")
-            if self.opt_exclude_virtual.isChecked():
+            if self.opt_exclude_virtual.isChecked() and not IS_WINDOWS:
                 for excl in ("^/sys", "^/proc", "^/dev", "^/run"):
                     args.append(f"--exclude-dir={excl}")
             if self.opt_cross_fs.isChecked():
@@ -7700,6 +8543,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             mb = self.max_size_spin.value()
             args.append(f"--max-filesize={mb}M")
             args.append(f"--max-scansize={mb}M")
+
+            if IS_WINDOWS and _has_clamav_db_files(_default_db_dir()):
+                args.append(f"--database={_default_db_dir()}")
 
             action = str(self.infected_action_combo.currentData())
             if action == "move":
@@ -7711,7 +8557,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             if log_path:
                 args.append(f"--log={log_path}")
 
-            target = self.scan_target_combo.currentText().strip() or "/"
+            target = self.scan_target_combo.currentText().strip() or _system_root_target()
             args.append(target)
             return args, log_path
 
@@ -7742,10 +8588,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 args = list(raw_args)
             else:
                 args = ["clamscan", "-r"]
-                if exclude_virtual:
+                if exclude_virtual and not IS_WINDOWS:
                     for excl in ("^/sys", "^/proc", "^/dev", "^/run"):
                         args.append(f"--exclude-dir={excl}")
                 args.extend(["--max-filesize=100M", "--max-scansize=100M"])
+                if IS_WINDOWS and _has_clamav_db_files(_default_db_dir()):
+                    args.append(f"--database={_default_db_dir()}")
                 if log_path:
                     args.append(f"--log={log_path}")
                 args.extend(targets)
@@ -7775,7 +8623,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             self._launch_scan_args(targets, label=self._tr("label_quick_scan"), exclude_virtual=False)
 
         def _start_full_scan(self) -> None:
-            self._launch_scan_args(["/"], label=self._tr("label_full_scan"), exclude_virtual=True)
+            self._launch_scan_args([_system_root_target()], label=self._tr("label_full_scan"), exclude_virtual=True)
 
         def _start_custom_picker_scan(self) -> None:
             dlg = FileOrFolderPickerDialog(self, self._tr("dlg_pick_title"), os.path.expanduser("~"))
@@ -7786,15 +8634,16 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 return
             first_name = os.path.basename(targets[0]) or targets[0]
             target_desc = first_name if len(targets) == 1 else f"{first_name} (+{len(targets) - 1})"
+            root_tgt = _system_root_target()
             self._launch_scan_args(
                 targets,
                 label=self._tr("label_custom_scan", target=target_desc),
-                exclude_virtual=("/" in targets),
+                exclude_virtual=(root_tgt in targets or "/" in targets),
             )
 
         def _start_new_scan(self) -> None:
             args, log_path = self._build_scan_command()
-            target = self.scan_target_combo.currentText().strip() or "/"
+            target = self.scan_target_combo.currentText().strip() or _system_root_target()
             self._launch_scan_args(
                 [target],
                 label=self._tr("label_custom_scan", target=target),

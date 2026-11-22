@@ -331,6 +331,7 @@ class TestUIAuthAndUnlockFlows(unittest.TestCase, _UIEnvMixin):
         self.assertTrue(self.win.root_badge_lbl.isHidden())
         self.assertEqual(self.win.telemetry.last_proc_data, {})
 
+    @unittest.skipIf(os.name == "nt", "POSIX polkit/sudo unlock prompt test")
     def test_pkexec_unlock_and_require_root_helper_prompt(self) -> None:
         # Clicking pkexec button enters waiting state, failure warns & restores button
         with mock.patch("threading.Thread") as mock_thread:
@@ -529,12 +530,15 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             self.assertNotIn("--exclude-dir=^/proc", calls[0][1]["cmd_args"])
             self.assertEqual(calls[1], ("set_priority", {"pid": 7777, "mode": "idle"}))
 
-            # Full Scan adds virtual exclusions
+            # Full Scan adds virtual exclusions on Linux and targets system root
             calls.clear()
             QTest.mouseClick(self.win.btn_full_scan, Qt.MouseButton.LeftButton)
             full_args = calls[0][1]["cmd_args"]
-            self.assertIn("--exclude-dir=^/proc", full_args)
-            self.assertEqual(full_args[-1], "/")
+            if app_mod.IS_WINDOWS:
+                self.assertNotIn("--exclude-dir=^/proc", full_args)
+            else:
+                self.assertIn("--exclude-dir=^/proc", full_args)
+            self.assertEqual(full_args[-1], app_mod._system_root_target())
 
             # Direct file/folder browser picker (no intermediate QMessageBox menu)
             with tempfile.TemporaryDirectory() as pick_tmp:
@@ -606,6 +610,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
                 mock_msg_exec.assert_not_called()
                 self.assertEqual(calls[0][1]["cmd_args"][-1], str(sample_file))
 
+    @unittest.skipIf(os.name == "nt", "POSIX signal test")
     def test_pause_stop_priority_and_restart_without_i(self) -> None:
         own_proc = {
             "pid": 6161,
@@ -617,7 +622,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
             "rss_kb": 1024,
             "cpu_ticks": 20,
             "user": "user",
-            "uid": os.getuid(),
+            "uid": app_mod._uid(),
             "log_path": "/tmp/custom.log",
         }
         self.win._current_proc = own_proc
@@ -811,6 +816,7 @@ class TestUIScanActionsAndProcessControl(unittest.TestCase, _UIEnvMixin):
         self.assertTrue(self.win.ctrl_box.isHidden())
         self.assertLess(self.win.height(), running_h - 100)
 
+    @unittest.skipIf(os.name == "nt", "POSIX signal test")
     def test_start_pause_then_cancel_real_helper_subprocess(self) -> None:
         # Real end-to-end HelperClient + `--helper` subprocess spawning and canceling a live process
         import shutil
@@ -1127,6 +1133,7 @@ class TestUIScheduleCustomScanAndUpdatesTabs(unittest.TestCase, _UIEnvMixin):
         self.assertEqual(mock_call.call_args[0][1]["frequency"], "daily")
         self.assertEqual(mock_call.call_args[0][1]["time_of_day"], "04:45")
 
+    @unittest.skipIf(os.name == "nt", "POSIX systemd schedule test")
     def test_schedule_save_updates_idle_home_card_and_disable_clears_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             svc = Path(tmpdir) / "clamav-gui-scan.service"
@@ -1406,6 +1413,7 @@ class TestUIGNOMECompatibility(unittest.TestCase, _UIEnvMixin):
             self.assertIn("critical", cmd)
             self.assertIn("string:desktop-entry:clamav-kde-gui", cmd)
 
+    @unittest.skipIf(os.name == "nt", "POSIX GNOME Nautilus reveal test")
     def test_gnome_threat_reveal_uses_nautilus_and_neutral_labels(self) -> None:
         self.win._open_tab(1)
         with mock.patch.object(self.win, "_notify"):
@@ -1630,7 +1638,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                         "rss_kb": 1024,
                         "cpu_ticks": 10,
                         "user": "user",
-                        "uid": os.getuid(),
+                        "uid": app_mod._uid(),
                         "log_path": "",
                     }
                     w._update_controls_enabled()

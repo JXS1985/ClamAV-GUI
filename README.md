@@ -68,6 +68,19 @@ Options:
 ./run.sh --self-test     # Run built-in diagnostics & JSON-RPC helper checks
 ```
 
+### Windows Support
+
+ClamAV Security Center also runs natively on Windows (from source via `run_windows.bat` or as the standalone `ClamAV-Security-Center-Windows-x64.zip` PyInstaller bundle from GitHub Releases) and smooths over ClamAV's manual Windows setup:
+
+- **Automatic ClamAV Discovery**: Finds `clamscan.exe`, `freshclam.exe`, and signature databases automatically across standard Windows install paths (`Program Files\ClamAV`, `ProgramData\clamav`, Scoop, Chocolatey, `winget`, or `PATH`).
+- **Zero-Config Signature Updates (`freshclam`)**: Automatically generates and maintains a working `freshclam.conf` in `%LOCALAPPDATA%\clamav-kde-gui\freshclam.conf` (removing the upstream `Example` blocker line and configuring a user-writable database directory under `%LOCALAPPDATA%\clamav-kde-gui\database`) so updating signatures works without editing config files or requiring admin rights.
+- **Native Windows Controls**: Uses a local helper process (no `sudo`/`pkexec`), Win32 thread suspend/resume and process priority/I/O telemetry, pure-Python scan precounting, `explorer.exe /select` file reveal, and Windows Task Scheduler (`schtasks`) for scheduled scans.
+
+```bat
+pip install PySide6
+run_windows.bat
+```
+
 ---
 
 ## Building Native Packages (`.deb` / `.rpm`)
