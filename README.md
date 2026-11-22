@@ -81,6 +81,20 @@ pip install PySide6
 run_windows.bat
 ```
 
+### macOS Support
+
+ClamAV Security Center runs natively on macOS (from source with Homebrew ClamAV or via the `ClamAV-Security-Center-macOS.zip` PyInstaller bundle from GitHub Releases):
+
+- **Automatic Homebrew Discovery**: Automatically adds `/opt/homebrew`, `/usr/local`, and `/opt/local` ClamAV binary and database directories (`clamscan`, `freshclam`, `.cvd`/`.cld` databases).
+- **Zero-Config Signature Updates (`freshclam`)**: Maintains a working `freshclam.conf` and signature directory in `~/Library/Application Support/clamav-kde-gui` so database updates work without manual config editing.
+- **Native macOS Integration**: Discovers and inspects `clamscan` via `ps` / `lsof`, suspends/resumes/throttles scans via POSIX signals and `renice`, reveals threats in Finder (`open -R`), and manages recurring scans via `launchd` LaunchAgents (`~/Library/LaunchAgents`).
+
+```bash
+brew install clamav
+pip install PySide6
+python3 clamav_gui.py
+```
+
 ---
 
 ## Building Native Packages (`.deb` / `.rpm`)

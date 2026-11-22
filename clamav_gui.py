@@ -11,6 +11,7 @@ import getpass
 import json
 import locale
 import os
+import plistlib
 try:
     import pwd
 except ImportError:  # Windows has no POSIX pwd database
@@ -32,6 +33,7 @@ from typing import Any
 
 SCRIPT_PATH = str(Path(__file__).resolve())
 IS_WINDOWS = os.name == "nt"
+IS_MACOS = sys.platform == "darwin"
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WINDOWS else 0
 
 
@@ -74,13 +76,25 @@ def _win_clamav_dirs() -> list[str]:
     return [p for i, p in enumerate(candidates) if p and p not in candidates[:i]]
 
 
+def _mac_clamav_dirs() -> list[str]:
+    return [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/opt/local/bin",
+        "/opt/local/sbin",
+    ]
+
+
 def _ensure_standard_path() -> None:
-    """Include /usr/sbin and /sbin (or Windows ClamAV dirs) so tools are found cleanly."""
-    extra = (
-        _win_clamav_dirs()
-        if IS_WINDOWS
-        else ["/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
-    )
+    """Include /usr/sbin and /sbin (or Windows / macOS Homebrew ClamAV dirs) so tools are found cleanly."""
+    if IS_WINDOWS:
+        extra = _win_clamav_dirs()
+    elif IS_MACOS:
+        extra = [*_mac_clamav_dirs(), "/usr/sbin", "/sbin"]
+    else:
+        extra = ["/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
     current = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
     merged = current + [p for p in extra if p not in current]
     os.environ["PATH"] = os.pathsep.join(merged)
@@ -93,6 +107,10 @@ APP_GITHUB_URL = "https://github.com/JXS1985/ClamAV-GUI"
 APP_LICENSE = "GNU General Public License v3.0 (GPL-3.0)"
 if IS_WINDOWS:
     APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "clamav-kde-gui"
+    DEFAULT_LOG_PATH = str(APP_DATA_DIR / "clamav-scan.log")
+    DEFAULT_QUARANTINE_DIR = str(APP_DATA_DIR / "quarantine")
+elif IS_MACOS:
+    APP_DATA_DIR = Path.home() / "Library" / "Application Support" / "clamav-kde-gui"
     DEFAULT_LOG_PATH = str(APP_DATA_DIR / "clamav-scan.log")
     DEFAULT_QUARANTINE_DIR = str(APP_DATA_DIR / "quarantine")
 else:
@@ -108,6 +126,11 @@ USER_SYSTEMD_SERVICE_PATH = str(USER_SYSTEMD_DIR / "clamav-gui-scan.service")
 USER_SYSTEMD_TIMER_PATH = str(USER_SYSTEMD_DIR / "clamav-gui-scan.timer")
 WINDOWS_SCHEDULE_CONFIG_PATH = APP_DATA_DIR / "schedule.json"
 WINDOWS_TASK_NAME = "ClamAVSecurityCenterScan"
+MACOS_LAUNCH_AGENT_LABEL = "io.github.jxs1985.clamav-security-center.scan"
+MACOS_LAUNCH_AGENT_PLIST = str(
+    Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LAUNCH_AGENT_LABEL}.plist"
+)
+MACOS_SCHEDULE_CONFIG_PATH = APP_DATA_DIR / "schedule.json"
 HISTORY_FILE_PATH = APP_DATA_DIR / "history.json"
 SETTINGS_FILE_PATH = APP_DATA_DIR / "settings.json"
 THREAT_LINE_RE = re.compile(r"^(.+?):\s+(.+?)\s+FOUND\s*$")
@@ -2707,7 +2730,139 @@ def _win32_is_pid_running(pid: int) -> bool:
 def _is_pid_running(pid: int) -> bool:
     if IS_WINDOWS:
         return _win32_is_pid_running(pid)
+    if IS_MACOS or not os.path.exists("/proc"):
+        with _SPAWNED_PROCS_LOCK:
+            spawned = _SPAWNED_PROCS.get(pid)
+        if spawned is not None and spawned.poll() is not None:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
     return os.path.exists(f"/proc/{pid}")
+
+
+def _parse_ps_etime(raw: str) -> float:
+    """Parse ps elapsed time format [[dd-]hh:]mm:ss into seconds."""
+    text = raw.strip()
+    if not text:
+        return 0.0
+    days = 0
+    if "-" in text:
+        d_part, text = text.split("-", 1)
+        try:
+            days = max(0, int(d_part))
+        except ValueError:
+            days = 0
+    parts = text.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return 0.0
+    if len(nums) == 3:
+        return float(days * 86400 + nums[0] * 3600 + nums[1] * 60 + nums[2])
+    if len(nums) == 2:
+        return float(days * 86400 + nums[0] * 60 + nums[1])
+    if len(nums) == 1:
+        return float(days * 86400 + nums[0])
+    return 0.0
+
+
+def _discover_macos_clamscan_processes() -> list[dict[str, Any]]:
+    """Discover running clamscan processes on macOS via ps and local helper metadata."""
+    meta_by_pid: dict[int, dict[str, Any]] = {}
+    with _SPAWNED_PROCS_LOCK:
+        for pid, proc in list(_SPAWNED_PROCS.items()):
+            if proc.poll() is None:
+                meta_by_pid[pid] = dict(_SPAWNED_PROCS_META.get(pid) or {})
+
+    found: dict[int, dict[str, Any]] = {}
+    try:
+        res = subprocess.run(
+            ["ps", "-axo", "pid=,uid=,user=,state=,nice=,rss=,etime=,comm=,args="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.splitlines():
+                parts = line.split(None, 8)
+                if len(parts) < 8 or not parts[0].isdigit():
+                    continue
+                pid_val = int(parts[0])
+                uid_val = int(parts[1]) if parts[1].isdigit() else _uid()
+                user_val = parts[2]
+                state_raw = parts[3]
+                if state_raw.startswith("Z"):
+                    continue
+                try:
+                    nice_val = int(parts[4])
+                except ValueError:
+                    nice_val = 0
+                try:
+                    rss_val = int(parts[5])
+                except ValueError:
+                    rss_val = 0
+                etime_sec = _parse_ps_etime(parts[6])
+                comm_raw = parts[7]
+                args_str = parts[8] if len(parts) > 8 else comm_raw
+                cmdline = args_str.split() if args_str else [comm_raw]
+                exe_base = os.path.basename(comm_raw).lower()
+                arg0_base = os.path.basename(cmdline[0]).lower() if cmdline else ""
+                if exe_base != "clamscan" and arg0_base != "clamscan":
+                    continue
+                meta = meta_by_pid.get(pid_val) or {}
+                if meta.get("cmdline"):
+                    cmdline = list(meta["cmdline"])
+                state_char = "T" if state_raw.startswith("T") else "R"
+                found[pid_val] = {
+                    "pid": pid_val,
+                    "comm": "clamscan",
+                    "state": state_char,
+                    "nice": nice_val,
+                    "cpu_ticks": 0,
+                    "elapsed_sec": etime_sec,
+                    "uid": uid_val,
+                    "user": user_val,
+                    "rss_kb": rss_val,
+                    "voluntary_ctxt_switches": 0,
+                    "nonvoluntary_ctxt_switches": 0,
+                    "cmdline": cmdline,
+                    "cmdline_str": " ".join(cmdline) if cmdline else "clamscan",
+                    "log_path": str(meta.get("log_path") or extract_log_path_from_cmdline(cmdline)),
+                    "quiet_infected_only": ("-i" in cmdline or "--infected" in cmdline),
+                }
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    current_user = getpass.getuser()
+    for pid_val, meta in meta_by_pid.items():
+        if pid_val not in found and _is_pid_running(pid_val):
+            cmdline = list(meta.get("cmdline") or ["clamscan"])
+            elapsed = max(0.0, time.monotonic() - float(meta["start_time"])) if "start_time" in meta else 0.0
+            found[pid_val] = {
+                "pid": pid_val,
+                "comm": "clamscan",
+                "state": "R",
+                "nice": 0,
+                "cpu_ticks": 0,
+                "elapsed_sec": elapsed,
+                "uid": _uid(),
+                "user": current_user,
+                "rss_kb": 0,
+                "voluntary_ctxt_switches": 0,
+                "nonvoluntary_ctxt_switches": 0,
+                "cmdline": cmdline,
+                "cmdline_str": " ".join(cmdline) if cmdline else "clamscan",
+                "log_path": str(meta.get("log_path") or extract_log_path_from_cmdline(cmdline)),
+                "quiet_infected_only": ("-i" in cmdline or "--infected" in cmdline),
+            }
+
+    return sorted(found.values(), key=lambda item: item["pid"])
 
 
 def _discover_windows_clamscan_processes() -> list[dict[str, Any]]:
@@ -2776,9 +2931,11 @@ def _discover_windows_clamscan_processes() -> list[dict[str, Any]]:
 
 
 def discover_clamscan_processes() -> list[dict[str, Any]]:
-    """Discover all active clamscan processes across Linux (/proc) and Windows."""
+    """Discover all active clamscan processes across Linux (/proc), macOS (ps), and Windows."""
     if IS_WINDOWS:
         return _discover_windows_clamscan_processes()
+    if IS_MACOS:
+        return _discover_macos_clamscan_processes()
     uptime = parse_proc_uptime()
     clk_tck = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
     found: list[dict[str, Any]] = []
@@ -3210,7 +3367,7 @@ def start_background_precount(
         with _PRECOUNT_LOCK:
             if _PRECOUNT_STATE.get("gen") != gen:
                 return
-        if IS_WINDOWS or shutil.which("find") is None:
+        if IS_WINDOWS or IS_MACOS or shutil.which("find") is None:
             _walk_precount(valid_targets, exclude_dirs, max_filesize, cross_fs, gen, t0)
             return
         cmd: list[str] = []
@@ -3440,6 +3597,11 @@ def _is_protected_system_path(target: str) -> bool:
                 norm_p = os.path.normcase(os.path.abspath(pref)).rstrip("\\")
                 if norm_c == norm_p or norm_c.startswith(norm_p + "\\"):
                     return True
+    elif IS_MACOS:
+        for candidate in (target, real):
+            for mac_pref in ("/System/", "/Library/", "/usr/", "/bin/", "/sbin/", "/private/etc/"):
+                if candidate == mac_pref.rstrip("/") or candidate.startswith(mac_pref):
+                    return True
     for candidate in (target, real):
         for prefix in _PROTECTED_SYSTEM_PREFIXES:
             if candidate == prefix or candidate.startswith(prefix + "/"):
@@ -3503,6 +3665,18 @@ def _validate_clamscan_pid(pid: int) -> None:
             p["pid"] == pid for p in _discover_windows_clamscan_processes()
         ):
             return
+        raise ProcessLookupError(f"Process {pid} no longer exists")
+    if IS_MACOS:
+        if pid == os.getpid():
+            raise PermissionError("Refusing to target GUI/helper process")
+        with _SPAWNED_PROCS_LOCK:
+            spawned = _SPAWNED_PROCS.get(pid)
+        if (spawned is not None and spawned.poll() is None) or any(
+            p["pid"] == pid for p in _discover_macos_clamscan_processes()
+        ):
+            return
+        if _is_pid_running(pid):
+            raise PermissionError(f"PID {pid} is not 'clamscan'")
         raise ProcessLookupError(f"Process {pid} no longer exists")
     comm_path = f"/proc/{pid}/comm"
     if not os.path.exists(comm_path):
@@ -3819,6 +3993,42 @@ def build_systemd_schedule_units(
     return service_unit, timer_unit, cfg
 
 
+def _inspect_macos_proc_fds(pid: int) -> dict[str, Any]:
+    """Read open files for clamscan on macOS via lsof when available."""
+    lsof_bin = shutil.which("lsof")
+    if not lsof_bin:
+        return {"current_file": None, "open_files": [], "tmp_count": 0, "fd_error": None}
+    real_files: list[str] = []
+    tmp_files: list[str] = []
+    mac_excluded = (*EXCLUDED_FD_PREFIXES, "/System/Library/", "/usr/lib/", "/private/var/db/", "/dev/")
+    try:
+        res = subprocess.run(
+            [lsof_bin, "-n", "-P", "-p", str(pid), "-Fn"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        for line in res.stdout.splitlines():
+            if not line.startswith("n/"):
+                continue
+            target = line[1:].strip()
+            if any(target.startswith(pref) for pref in mac_excluded):
+                continue
+            if target.startswith("/tmp/clamav-") or target.startswith("/private/tmp/clamav-"):
+                tmp_files.append(target)
+            else:
+                real_files.append(target)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"current_file": None, "open_files": [], "tmp_count": 0, "fd_error": str(exc)}
+    return {
+        "current_file": real_files[-1] if real_files else None,
+        "open_files": real_files[-10:],
+        "tmp_count": len(tmp_files),
+        "fd_error": None,
+    }
+
+
 def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
     pid = params.get("pid")
     raw_log = str(params.get("log_path") or "").strip()
@@ -3849,6 +4059,12 @@ def _helper_inspect_proc(params: dict[str, Any]) -> dict[str, Any]:
                 "open_files": [],
                 "tmp_count": 0,
                 "fd_error": None,
+            }
+        elif IS_MACOS:
+            proc_info = {
+                "alive": True,
+                "io": {},
+                **_inspect_macos_proc_fds(pid),
             }
         else:
             proc_info = {
@@ -3891,6 +4107,27 @@ def _terminate_pid_gracefully(pid: int, force_cont: bool = False) -> None:
                 check=False,
                 creationflags=_SUBPROCESS_NO_WINDOW,
             )
+        return
+
+    if IS_MACOS:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            if force_cont:
+                os.kill(pid, signal.SIGCONT)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline and _is_pid_running(pid):
+            time.sleep(0.05)
+        if _is_pid_running(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                return
+            kill_deadline = time.monotonic() + 1.0
+            while time.monotonic() < kill_deadline and _is_pid_running(pid):
+                time.sleep(0.05)
         return
 
     stat_before = parse_proc_stat(pid)
@@ -3975,10 +4212,10 @@ def _helper_signal_proc(params: dict[str, Any]) -> dict[str, Any]:
         _reap_spawned_proc(pid)
     elif sig_name == "SIGKILL":
         cancel_background_precount()
-        stat_before = parse_proc_stat(pid)
+        stat_before = None if IS_MACOS else parse_proc_stat(pid)
         try:
             os.kill(pid, signal.SIGKILL)
-            if stat_before and stat_before.get("state") == "T":
+            if IS_MACOS or (stat_before and stat_before.get("state") == "T"):
                 os.kill(pid, signal.SIGCONT)
         except ProcessLookupError:
             pass
@@ -4018,6 +4255,14 @@ def _helper_set_priority(params: dict[str, Any]) -> dict[str, Any]:
         text=True,
         check=False,
     )
+    if IS_MACOS or shutil.which("ionice") is None:
+        if renice_res.returncode != 0 and _euid() == 0:
+            raise RuntimeError(renice_res.stderr.strip() or renice_res.stdout.strip() or "renice failed")
+        return {
+            "pid": pid,
+            "mode": mode,
+            "renice": renice_res.stdout.strip() or renice_res.stderr.strip(),
+        }
     ionice_cmd = ["ionice", "-c", io_class]
     if io_level is not None:
         ionice_cmd.extend(["-n", io_level])
@@ -4050,15 +4295,23 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
         if os.path.basename(resolved_exe).lower() not in allowed_exe_names:
             raise PermissionError("Only clamscan may be launched")
     else:
-        resolved_exe = _find_binary_path(
-            "clamscan",
-            tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs()) if IS_WINDOWS else ("/usr/bin/clamscan",),
-        ) or ("clamscan.exe" if IS_WINDOWS else "/usr/bin/clamscan")
+        fallbacks: tuple[str, ...] = ("/usr/bin/clamscan",)
+        if IS_WINDOWS:
+            fallbacks = tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs())
+        elif IS_MACOS:
+            fallbacks = tuple(os.path.join(d, "clamscan") for d in _mac_clamav_dirs())
+        resolved_exe = _find_binary_path("clamscan", fallbacks) or (
+            "clamscan.exe" if IS_WINDOWS else "clamscan" if IS_MACOS else "/usr/bin/clamscan"
+        )
         if os.path.exists(resolved_exe):
             resolved_exe = os.path.realpath(resolved_exe)
 
     if (not IS_WINDOWS) and _euid() == 0:
-        trusted_dirs = ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/")
+        trusted_dirs = (
+            ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/opt/homebrew/bin/", "/usr/local/bin/", "/opt/local/bin/")
+            if IS_MACOS
+            else ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/")
+        )
         if not resolved_exe.startswith(trusted_dirs) or not _is_secure_root_owned_path(resolved_exe):
             raise PermissionError(f"Refusing untrusted clamscan binary: {resolved_exe}")
 
@@ -4083,14 +4336,14 @@ def _validate_clamscan_args(cmd_args: list[str]) -> list[str]:
         elif s.startswith("--max-scansize=") and size_re.match(s.split("=", 1)[1]):
             validated.append(s)
         elif s.startswith("--database="):
-            if (not IS_WINDOWS) and _euid() == 0:
+            if (not IS_WINDOWS) and (not IS_MACOS) and _euid() == 0:
                 raise PermissionError(f"Unsupported or disallowed clamscan flag: {s}")
             db_arg = s.split("=", 1)[1].strip()
             if not db_arg or "\x00" in db_arg or not os.path.isabs(db_arg):
                 raise ValueError(f"Database path must be absolute: {db_arg}")
             validated.append(f"--database={db_arg}")
         elif s == "-d" and idx < len(args_list):
-            if (not IS_WINDOWS) and _euid() == 0:
+            if (not IS_WINDOWS) and (not IS_MACOS) and _euid() == 0:
                 raise PermissionError(f"Unsupported or disallowed clamscan flag: {s}")
             db_arg = str(args_list[idx]).strip()
             idx += 1
@@ -4202,25 +4455,40 @@ def _has_clamav_db_files(db_dir: str) -> bool:
     return False
 
 
+def _mac_clamav_db_dirs() -> list[str]:
+    return [
+        "/opt/homebrew/var/lib/clamav",
+        "/usr/local/var/lib/clamav",
+        "/opt/local/var/db/clamav",
+        "/var/lib/clamav",
+        str(APP_DATA_DIR / "database"),
+    ]
+
+
 def _default_db_dir() -> str:
     """Return platform-appropriate ClamAV virus signature directory."""
-    if not IS_WINDOWS:
-        if _has_clamav_db_files("/var/lib/clamav"):
-            return "/var/lib/clamav"
-        user_db = str(APP_DATA_DIR / "database")
-        if _has_clamav_db_files(user_db):
-            return user_db
+    if IS_WINDOWS:
+        prog_data = os.environ.get("ProgramData") or r"C:\ProgramData"
+        candidates = [os.path.join(prog_data, "ClamAV", "db")]
+        for d in _win_clamav_dirs():
+            candidates.append(os.path.join(d, "database"))
+            candidates.append(os.path.join(d, "db"))
+        candidates.append(str(APP_DATA_DIR / "database"))
+        for c in candidates:
+            if _has_clamav_db_files(c):
+                return c
+        return str(APP_DATA_DIR / "database")
+    if IS_MACOS:
+        for c in _mac_clamav_db_dirs():
+            if _has_clamav_db_files(c):
+                return c
+        return str(APP_DATA_DIR / "database")
+    if _has_clamav_db_files("/var/lib/clamav"):
         return "/var/lib/clamav"
-    prog_data = os.environ.get("ProgramData") or r"C:\ProgramData"
-    candidates = [os.path.join(prog_data, "ClamAV", "db")]
-    for d in _win_clamav_dirs():
-        candidates.append(os.path.join(d, "database"))
-        candidates.append(os.path.join(d, "db"))
-    candidates.append(str(APP_DATA_DIR / "database"))
-    for c in candidates:
-        if _has_clamav_db_files(c):
-            return c
-    return str(APP_DATA_DIR / "database")
+    user_db = str(APP_DATA_DIR / "database")
+    if _has_clamav_db_files(user_db):
+        return user_db
+    return "/var/lib/clamav"
 
 
 def _is_dir_writable(path: str) -> bool:
@@ -4306,7 +4574,7 @@ def _ensure_windows_freshclam_config(
 
 def _detect_freshclam_services() -> tuple[list[str], str]:
     """Detect active/installed freshclam systemd unit across RHEL and openSUSE."""
-    if IS_WINDOWS:
+    if IS_WINDOWS or IS_MACOS:
         return [], "manual"
     candidates = ("clamav-freshclam.service", "freshclam.service", "freshclam.timer")
     active_units: list[str] = []
@@ -4333,19 +4601,22 @@ def _detect_freshclam_services() -> tuple[list[str], str]:
 
 def _helper_run_freshclam(params: dict[str, Any]) -> dict[str, Any]:
     win_candidates = tuple(os.path.join(d, "freshclam.exe") for d in _win_clamav_dirs()) if IS_WINDOWS else ()
+    mac_candidates = tuple(os.path.join(d, "freshclam") for d in _mac_clamav_dirs()) if IS_MACOS else ()
     freshclam_bin = _find_binary_path(
         "freshclam",
-        (*win_candidates, "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
-        if not IS_WINDOWS
-        else win_candidates,
+        win_candidates
+        if IS_WINDOWS
+        else (*mac_candidates, "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
+        if IS_MACOS
+        else ("/usr/sbin/freshclam", "/usr/local/bin/freshclam"),
     )
     if not freshclam_bin or not os.path.exists(freshclam_bin):
         raise FileNotFoundError("freshclam binary not found")
 
-    if IS_WINDOWS or bool(params.get("user_mode")):
+    if IS_WINDOWS or IS_MACOS or bool(params.get("user_mode")):
         conf_path, db_dir = _ensure_windows_freshclam_config(
             freshclam_bin,
-            force_user_dir=(not IS_WINDOWS) and bool(params.get("user_mode")),
+            force_user_dir=(not IS_WINDOWS) and (IS_MACOS or bool(params.get("user_mode"))),
         )
         update_res = subprocess.run(
             [freshclam_bin, f"--config-file={conf_path}", f"--datadir={db_dir}"],
@@ -4778,8 +5049,135 @@ def _helper_windows_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
     return _helper_windows_get_schedule()
 
 
+def _helper_macos_get_schedule() -> dict[str, Any]:
+    """Read scheduled ClamAV scan settings and launchd LaunchAgent status on macOS."""
+    cfg: dict[str, Any] = {
+        "frequency": "weekly",
+        "day_of_week": "Sun",
+        "time_of_day": "03:00",
+        "scan_type": "quick",
+        "enabled": False,
+    }
+    saved = load_json_file(MACOS_SCHEDULE_CONFIG_PATH, {})
+    if isinstance(saved, dict):
+        cfg.update(saved)
+
+    enabled = bool(cfg.get("enabled")) and os.path.isfile(MACOS_LAUNCH_AGENT_PLIST)
+    if enabled:
+        if cfg.get("frequency") == "daily":
+            next_run = f"Daily {cfg.get('time_of_day', '03:00')} (launchd)"
+        else:
+            next_run = f"{cfg.get('day_of_week', 'Sun')} {cfg.get('time_of_day', '03:00')} (launchd)"
+    else:
+        next_run = "-"
+    cfg["enabled"] = enabled
+    return {"enabled": enabled, "next_run": next_run, **cfg}
+
+
+def _helper_macos_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
+    """Create, update, or remove the macOS launchd LaunchAgent ClamAV scan timer."""
+    enabled = bool(params.get("enabled", False))
+    day_map = {
+        "monday": ("Mon", 1),
+        "mon": ("Mon", 1),
+        "tuesday": ("Tue", 2),
+        "tue": ("Tue", 2),
+        "wednesday": ("Wed", 3),
+        "wed": ("Wed", 3),
+        "thursday": ("Thu", 4),
+        "thu": ("Thu", 4),
+        "friday": ("Fri", 5),
+        "fri": ("Fri", 5),
+        "saturday": ("Sat", 6),
+        "sat": ("Sat", 6),
+        "sunday": ("Sun", 0),
+        "sun": ("Sun", 0),
+    }
+    freq = "weekly" if str(params.get("frequency") or "weekly").lower() == "weekly" else "daily"
+    day3, weekday_num = day_map.get(str(params.get("day_of_week") or "Sun").strip().lower(), ("Sun", 0))
+    parts = str(params.get("time_of_day") or "03:00").strip().split(":")
+    try:
+        hh = max(0, min(23, int(parts[0])))
+        mm = max(0, min(59, int(parts[1]))) if len(parts) > 1 else 0
+    except ValueError:
+        hh, mm = 3, 0
+    time_norm = f"{hh:02d}:{mm:02d}"
+    stype = "full" if str(params.get("scan_type") or "quick").lower() == "full" else "quick"
+
+    cfg = {
+        "enabled": enabled,
+        "frequency": freq,
+        "day_of_week": day3,
+        "time_of_day": time_norm,
+        "scan_type": stype,
+    }
+    save_json_file(MACOS_SCHEDULE_CONFIG_PATH, cfg)
+
+    if not enabled:
+        if os.path.exists(MACOS_LAUNCH_AGENT_PLIST):
+            try:
+                subprocess.run(
+                    ["launchctl", "unload", MACOS_LAUNCH_AGENT_PLIST],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except OSError:
+                pass
+            try:
+                os.unlink(MACOS_LAUNCH_AGENT_PLIST)
+            except OSError:
+                pass
+        return _helper_macos_get_schedule()
+
+    clamscan_bin = _find_binary_path(
+        "clamscan", tuple(os.path.join(d, "clamscan") for d in _mac_clamav_dirs())
+    ) or "clamscan"
+    quick_targets = [str(p) for p in (params.get("quick_targets") or []) if os.path.exists(str(p))]
+    targets = [_system_root_target()] if stype == "full" else (quick_targets or get_quick_scan_targets())
+    db_dir = _default_db_dir()
+    prog_args = [clamscan_bin, "-r"]
+    if _has_clamav_db_files(db_dir):
+        prog_args.append(f"--database={db_dir}")
+    prog_args.extend(["--max-filesize=100M", "--max-scansize=100M", f"--log={DEFAULT_LOG_PATH}", *targets])
+
+    cal_interval: dict[str, int] = {"Hour": hh, "Minute": mm}
+    if freq == "weekly":
+        cal_interval["Weekday"] = weekday_num
+
+    plist_data = {
+        "Label": MACOS_LAUNCH_AGENT_LABEL,
+        "ProgramArguments": prog_args,
+        "StartCalendarInterval": cal_interval,
+        "Nice": 19,
+        "LowPriorityIO": True,
+        "StandardOutPath": DEFAULT_LOG_PATH,
+        "StandardErrorPath": DEFAULT_LOG_PATH,
+    }
+    os.makedirs(os.path.dirname(MACOS_LAUNCH_AGENT_PLIST), exist_ok=True)
+    with open(MACOS_LAUNCH_AGENT_PLIST, "wb") as fh:
+        fh.write(plistlib.dumps(plist_data))
+    subprocess.run(
+        ["launchctl", "unload", MACOS_LAUNCH_AGENT_PLIST],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    res = subprocess.run(
+        ["launchctl", "load", "-w", MACOS_LAUNCH_AGENT_PLIST],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode != 0:
+        err = res.stderr.strip() or res.stdout.strip()
+        if err:
+            raise RuntimeError(err)
+    return _helper_macos_get_schedule()
+
+
 def _is_user_schedule_mode(params: dict[str, Any] | None = None) -> bool:
-    if IS_WINDOWS:
+    if IS_WINDOWS or IS_MACOS:
         return False
     if params and "user_mode" in params:
         return bool(params["user_mode"])
@@ -4791,6 +5189,8 @@ def _is_user_schedule_mode(params: dict[str, Any] | None = None) -> bool:
 def _helper_get_schedule(params: dict[str, Any]) -> dict[str, Any]:
     if IS_WINDOWS:
         return _helper_windows_get_schedule()
+    if IS_MACOS:
+        return _helper_macos_get_schedule()
     user_mode = _is_user_schedule_mode(params)
     tmr_path = USER_SYSTEMD_TIMER_PATH if user_mode else SYSTEMD_TIMER_PATH
     systemctl_cmd = ["systemctl", "--user"] if user_mode else ["systemctl"]
@@ -4850,6 +5250,8 @@ def _helper_get_schedule(params: dict[str, Any]) -> dict[str, Any]:
 def _helper_set_schedule(params: dict[str, Any]) -> dict[str, Any]:
     if IS_WINDOWS:
         return _helper_windows_set_schedule(params)
+    if IS_MACOS:
+        return _helper_macos_set_schedule(params)
     user_mode = _is_user_schedule_mode(params)
     svc_path = USER_SYSTEMD_SERVICE_PATH if user_mode else SYSTEMD_SERVICE_PATH
     tmr_path = USER_SYSTEMD_TIMER_PATH if user_mode else SYSTEMD_TIMER_PATH
@@ -5073,7 +5475,7 @@ class HelperClient:
 
     @property
     def is_root(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None and (self.uid == 0 or IS_WINDOWS)
+        return self._proc is not None and self._proc.poll() is None and (self.uid == 0 or IS_WINDOWS or IS_MACOS)
 
     @property
     def is_user_mode(self) -> bool:
@@ -5083,6 +5485,7 @@ class HelperClient:
             and self.uid is not None
             and self.uid != 0
             and not IS_WINDOWS
+            and not IS_MACOS
         )
 
     def close(self) -> None:
@@ -5365,11 +5768,15 @@ def check_system_dependencies(db_dir: str | None = None) -> dict[str, Any]:
     clamscan_fallbacks = (
         tuple(os.path.join(d, "clamscan.exe") for d in _win_clamav_dirs())
         if IS_WINDOWS
+        else tuple(os.path.join(d, "clamscan") for d in _mac_clamav_dirs())
+        if IS_MACOS
         else ("/usr/bin/clamscan", "/usr/sbin/clamscan")
     )
     freshclam_fallbacks = (
         tuple(os.path.join(d, "freshclam.exe") for d in _win_clamav_dirs())
         if IS_WINDOWS
+        else tuple(os.path.join(d, "freshclam") for d in _mac_clamav_dirs())
+        if IS_MACOS
         else ("/usr/bin/freshclam", "/usr/sbin/freshclam", "/usr/local/bin/freshclam")
     )
     clamscan_path = _find_binary_path("clamscan", clamscan_fallbacks)
@@ -5378,13 +5785,19 @@ def check_system_dependencies(db_dir: str | None = None) -> dict[str, Any]:
     tools: dict[str, bool] = {
         "clamscan": clamscan_path is not None,
         "freshclam": freshclam_path is not None,
-        "pkexec": False if IS_WINDOWS else (_find_binary_path("pkexec") is not None),
+        "pkexec": False if (IS_WINDOWS or IS_MACOS) else (_find_binary_path("pkexec") is not None),
         "sudo": False if IS_WINDOWS else (_find_binary_path("sudo") is not None),
         "find": True if IS_WINDOWS else (_find_binary_path("find") is not None),
         "renice": True if IS_WINDOWS else (_find_binary_path("renice") is not None),
-        "ionice": True if IS_WINDOWS else (_find_binary_path("ionice") is not None),
-        "systemctl": (_find_binary_path("schtasks") is not None) if IS_WINDOWS else (_find_binary_path("systemctl") is not None),
-        "notify-send": True if IS_WINDOWS else (_find_binary_path("notify-send") is not None),
+        "ionice": True if (IS_WINDOWS or IS_MACOS) else (_find_binary_path("ionice") is not None),
+        "systemctl": (
+            _find_binary_path("schtasks") is not None
+            if IS_WINDOWS
+            else (_find_binary_path("launchctl") is not None)
+            if IS_MACOS
+            else (_find_binary_path("systemctl") is not None)
+        ),
+        "notify-send": True if (IS_WINDOWS or IS_MACOS) else (_find_binary_path("notify-send") is not None),
     }
 
     db_files: list[str] = []
@@ -5399,11 +5812,11 @@ def check_system_dependencies(db_dir: str | None = None) -> dict[str, Any]:
             pass
 
     missing_required = [pkg for pkg in ("clamscan", "freshclam") if not tools[pkg]]
-    if (not IS_WINDOWS) and not tools["pkexec"] and not tools["sudo"]:
+    if (not IS_WINDOWS) and (not IS_MACOS) and not tools["pkexec"] and not tools["sudo"]:
         missing_required.append("pkexec/sudo")
     missing_optional = (
         []
-        if IS_WINDOWS
+        if (IS_WINDOWS or IS_MACOS)
         else [
             tool
             for tool in ("pkexec", "sudo", "find", "renice", "ionice", "systemctl", "notify-send")
@@ -5510,9 +5923,11 @@ def _gdbus_show_items_command(path: str) -> list[str]:
 
 
 def build_reveal_file_command(path: str, desktop: str | None = None) -> list[str]:
-    """Build command to reveal and highlight a file in Explorer, KDE Dolphin, GNOME Files, or fallback."""
+    """Build command to reveal and highlight a file in Finder, Explorer, KDE Dolphin, GNOME Files, or fallback."""
     if IS_WINDOWS:
         return ["explorer.exe", f"/select,{os.path.normpath(path)}"]
+    if IS_MACOS:
+        return ["open", "-R", path]
     de = desktop or detect_desktop_environment()
     if de == "kde" and shutil.which("dolphin"):
         return ["dolphin", "--select", path]
@@ -7507,11 +7922,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             settings = load_json_file(SETTINGS_FILE_PATH, {})
             has_polkit_rule = (
                 (not IS_WINDOWS)
+                and (not IS_MACOS)
                 and (os.path.exists(POLKIT_RULE_PATH) or bool(settings.get("polkit_rule_installed")))
             )
 
             def _auto_worker() -> None:
-                if IS_WINDOWS or _euid() == 0:
+                if IS_WINDOWS or IS_MACOS or _euid() == 0:
                     ok_local, _ = self.helper.start_local()
                     if ok_local:
                         self.signals.auto_sudo_done.emit(True)
@@ -7758,8 +8174,9 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
         def _read_idle_schedule_display(self) -> str:
             """Summarize scheduled scan timer cleanly without spawning elevated commands."""
-            if IS_WINDOWS:
-                cfg = load_json_file(WINDOWS_SCHEDULE_CONFIG_PATH, {})
+            if IS_WINDOWS or IS_MACOS:
+                cfg_path = WINDOWS_SCHEDULE_CONFIG_PATH if IS_WINDOWS else MACOS_SCHEDULE_CONFIG_PATH
+                cfg = load_json_file(cfg_path, {})
                 if not isinstance(cfg, dict) or not cfg.get("enabled"):
                     return self._tr("idle_val_not_sched")
                 time_val = str(cfg.get("time_of_day") or "03:00")
@@ -8337,7 +8754,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
         def _require_root_helper(self) -> bool:
             if self.helper.is_connected:
                 return True
-            if IS_WINDOWS:
+            if IS_WINDOWS or IS_MACOS:
                 ok, msg = self.helper.start_local()
                 if ok:
                     self._on_root_unlocked()
@@ -8739,7 +9156,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
             args.append(f"--max-scansize={mb}M")
 
             db_dir = _default_db_dir()
-            if (IS_WINDOWS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
+            if (IS_WINDOWS or IS_MACOS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
                 args.append(f"--database={db_dir}")
 
             action = str(self.infected_action_combo.currentData())
@@ -8793,7 +9210,7 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                         args.append(f"--exclude-dir={excl}")
                 args.extend(["--max-filesize=100M", "--max-scansize=100M"])
                 db_dir = _default_db_dir()
-                if (IS_WINDOWS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
+                if (IS_WINDOWS or IS_MACOS or (self.helper.is_user_mode and db_dir != "/var/lib/clamav")) and _has_clamav_db_files(db_dir):
                     args.append(f"--database={db_dir}")
                 if log_path:
                     args.append(f"--log={log_path}")

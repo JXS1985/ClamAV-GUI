@@ -230,7 +230,7 @@ class TestFormattingAndParsers(unittest.TestCase):
 class TestProcAndFilesystemTelemetry(unittest.TestCase):
     """Tests for /proc inspection, PID validation, statvfs disk estimation, and background pre-counter."""
 
-    @unittest.skipIf(os.name == "nt", "POSIX /proc and UID test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX /proc and UID test")
     def test_proc_readers_on_self_and_missing(self) -> None:
         pid = os.getpid()
         self.assertGreater(app_mod.parse_proc_uptime(), 0.0)
@@ -250,7 +250,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
         self.assertIsNone(app_mod.parse_proc_stat(99999999))
         self.assertEqual(app_mod.read_proc_cmdline(99999999), [])
 
-    @unittest.skipIf(os.name == "nt", "POSIX /proc and UID test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX /proc and UID test")
     def test_discover_clamscan_processes_and_validate_pid(self) -> None:
         # Real PID 1 or self is not clamscan -> PermissionError
         with self.assertRaises(ValueError):
@@ -315,7 +315,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
             self.assertEqual(found[0]["log_path"], "/tmp/t.log")
             self.assertTrue(found[0]["quiet_infected_only"])
 
-    @unittest.skipIf(os.name == "nt", "POSIX /proc fd test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX /proc fd test")
     def test_inspect_proc_fds_and_io(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fd_dir = Path(tmpdir) / "fd"
@@ -388,7 +388,7 @@ class TestProcAndFilesystemTelemetry(unittest.TestCase):
             self.assertFalse(snap_empty.get("running"))
 
 
-@unittest.skipIf(os.name == "nt", "POSIX helper handler tests")
+@unittest.skipIf(sys.platform != "linux", "POSIX helper handler tests")
 class TestPrivilegedHelperHandlers(unittest.TestCase):
     """Tests for helper file/process/systemd/polkit/quarantine handlers with mocked privileged OS ops."""
 
@@ -641,7 +641,7 @@ class TestPrivilegedHelperHandlers(unittest.TestCase):
 class TestHelperRPCSubprocessAndClient(unittest.TestCase):
     """Integration tests spawning `--helper` and verifying HelperClient error/disconnect handling."""
 
-    @unittest.skipIf(os.name == "nt", "POSIX helper RPC / SIGSTOP security test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX helper RPC / SIGSTOP security test")
     def test_helper_rpc_protocol_and_security_guards(self) -> None:
         proc = subprocess.Popen(
             [sys.executable, app_mod.SCRIPT_PATH, "--helper"],
@@ -859,7 +859,7 @@ class TestDesktopEnvironmentIntegration(unittest.TestCase):
         ):
             self.assertEqual(app_mod.detect_desktop_environment(), "other")
 
-    @unittest.skipIf(os.name == "nt", "POSIX desktop reveal test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX desktop reveal test")
     def test_build_reveal_file_command_kde_gnome_and_fallbacks(self) -> None:
         # KDE selects Dolphin
         with mock.patch("shutil.which", side_effect=lambda b: "/usr/bin/dolphin" if b == "dolphin" else None):
@@ -892,7 +892,7 @@ class TestDesktopEnvironmentIntegration(unittest.TestCase):
             )
 
 
-@unittest.skipIf(os.name == "nt", "POSIX security hardening tests")
+@unittest.skipIf(sys.platform != "linux", "POSIX security hardening tests")
 class TestSecurityHardening(unittest.TestCase):
     """Security regression tests for root helper privilege boundaries and input sanitization."""
 
@@ -1117,7 +1117,7 @@ class TestSecurityHardening(unittest.TestCase):
                 vos.verify_start_menu_entry("gnome")
 
 
-@unittest.skipIf(os.name == "nt", "POSIX signal and systemd schedule tests")
+@unittest.skipIf(sys.platform != "linux", "POSIX signal and systemd schedule tests")
 class TestScheduleAndCancellation(unittest.TestCase):
     """Real-subprocess and filesystem tests for scan cancellation, precount cancel, and systemd schedules."""
 
@@ -1537,7 +1537,7 @@ class TestUserModeFallback(unittest.TestCase):
             self.assertFalse(client.is_user_mode)
         client._proc = None
 
-    @unittest.skipIf(os.name == "nt", "POSIX path remapping test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX path remapping test")
     def test_user_mode_log_and_quarantine_path_remapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1557,7 +1557,7 @@ class TestUserModeFallback(unittest.TestCase):
             finally:
                 app_mod.APP_DATA_DIR = orig_app_dir
 
-    @unittest.skipIf(os.name == "nt", "POSIX user-mode freshclam and priority test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX user-mode freshclam and priority test")
     def test_user_mode_freshclam_and_priority_tolerance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1618,7 +1618,7 @@ class TestUserModeFallback(unittest.TestCase):
             finally:
                 app_mod.APP_DATA_DIR = orig_app_dir
 
-    @unittest.skipIf(os.name == "nt", "POSIX systemd --user schedule test")
+    @unittest.skipIf(sys.platform != "linux", "POSIX systemd --user schedule test")
     def test_user_mode_systemd_schedule_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1677,6 +1677,141 @@ class TestUserModeFallback(unittest.TestCase):
                 app_mod.APP_DATA_DIR = orig_app_dir
                 app_mod.USER_SYSTEMD_SERVICE_PATH = orig_svc
                 app_mod.USER_SYSTEMD_TIMER_PATH = orig_tmr
+                app_mod.DEFAULT_LOG_PATH = orig_log
+
+
+class TestMacOSCompatibility(unittest.TestCase):
+    """Cross-platform tests for macOS Homebrew discovery, ps discovery, Finder reveal, deps, and launchd schedules."""
+
+    def test_mac_clamav_dirs_default_db_and_reveal(self) -> None:
+        dirs = app_mod._mac_clamav_dirs()
+        self.assertIn("/opt/homebrew/bin", dirs)
+        self.assertIn("/usr/local/bin", dirs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            hb_db = root / "hb_db"
+            hb_db.mkdir()
+            (hb_db / "main.cvd").write_bytes(b"CVD")
+            orig_app_dir = app_mod.APP_DATA_DIR
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "IS_MACOS", True),
+                    mock.patch.object(app_mod, "_mac_clamav_db_dirs", return_value=[str(hb_db)]),
+                ):
+                    self.assertEqual(app_mod._default_db_dir(), str(hb_db))
+                    (hb_db / "main.cvd").unlink()
+                    self.assertEqual(app_mod._default_db_dir(), str(app_mod.APP_DATA_DIR / "database"))
+
+                    with (
+                        mock.patch("shutil.which", return_value=None),
+                        mock.patch("os.path.isfile", return_value=False),
+                    ):
+                        deps = app_mod.check_system_dependencies(db_dir=tmpdir)
+                    self.assertEqual(deps["missing_required"], ["clamscan", "freshclam"])
+                    self.assertEqual(deps["missing_optional"], [])
+                    self.assertFalse(deps["tools"]["pkexec"])
+
+                    self.assertEqual(
+                        app_mod.build_reveal_file_command("/Users/alice/bad.bin"),
+                        ["open", "-R", "/Users/alice/bad.bin"],
+                    )
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+
+    def test_parse_ps_etime_and_discover_macos_clamscan_processes(self) -> None:
+        self.assertEqual(app_mod._parse_ps_etime("05:12"), 312.0)
+        self.assertEqual(app_mod._parse_ps_etime("01:02:03"), 3723.0)
+        self.assertEqual(app_mod._parse_ps_etime("2-00:01:00"), 172860.0)
+
+        ps_stdout = (
+            "  101  501 alice Ss     0   1024  00:10 /bin/zsh zsh\n"
+            "  202  501 alice T     19  40960  02:05 /opt/homebrew/bin/clamscan /opt/homebrew/bin/clamscan -r -i --log=/tmp/mac.log /Users/alice\n"
+            "  303  501 alice Z      0      0  00:01 /opt/homebrew/bin/clamscan clamscan -r /tmp\n"
+        )
+        with (
+            mock.patch.object(app_mod, "IS_WINDOWS", False),
+            mock.patch.object(app_mod, "IS_MACOS", True),
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=ps_stdout, stderr="")),
+        ):
+            procs = app_mod._discover_macos_clamscan_processes()
+
+        self.assertEqual(len(procs), 1)
+        self.assertEqual(procs[0]["pid"], 202)
+        self.assertEqual(procs[0]["state"], "T")
+        self.assertEqual(procs[0]["nice"], 19)
+        self.assertEqual(procs[0]["rss_kb"], 40960)
+        self.assertEqual(procs[0]["elapsed_sec"], 125.0)
+        self.assertEqual(procs[0]["log_path"], "/tmp/mac.log")
+        self.assertTrue(procs[0]["quiet_infected_only"])
+
+    def test_macos_launchd_schedule_set_and_get(self) -> None:
+        import plistlib
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            orig_app_dir = app_mod.APP_DATA_DIR
+            orig_cfg = app_mod.MACOS_SCHEDULE_CONFIG_PATH
+            orig_plist = app_mod.MACOS_LAUNCH_AGENT_PLIST
+            orig_log = app_mod.DEFAULT_LOG_PATH
+            cmds: list[list[str]] = []
+
+            def _fake_run(cmd: list[str], **_kwargs: object) -> mock.Mock:
+                cmds.append(list(cmd))
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            try:
+                app_mod.APP_DATA_DIR = root / "appdata"
+                app_mod.MACOS_SCHEDULE_CONFIG_PATH = app_mod.APP_DATA_DIR / "schedule.json"
+                app_mod.MACOS_LAUNCH_AGENT_PLIST = str(root / "LaunchAgents" / f"{app_mod.MACOS_LAUNCH_AGENT_LABEL}.plist")
+                app_mod.DEFAULT_LOG_PATH = str(app_mod.APP_DATA_DIR / "clamav-scan.log")
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "IS_MACOS", True),
+                    mock.patch.object(app_mod, "_find_binary_path", return_value="/opt/homebrew/bin/clamscan"),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res_on = app_mod._helper_macos_set_schedule(
+                        {
+                            "enabled": True,
+                            "frequency": "weekly",
+                            "day_of_week": "Fri",
+                            "time_of_day": "06:45",
+                            "scan_type": "quick",
+                            "quick_targets": [tmpdir],
+                        }
+                    )
+                self.assertTrue(res_on["enabled"])
+                self.assertEqual(res_on["day_of_week"], "Fri")
+                self.assertEqual(res_on["time_of_day"], "06:45")
+                self.assertIn("launchd", res_on["next_run"])
+
+                plist_path = Path(app_mod.MACOS_LAUNCH_AGENT_PLIST)
+                self.assertTrue(plist_path.is_file())
+                parsed_plist = plistlib.loads(plist_path.read_bytes())
+                self.assertEqual(parsed_plist["Label"], app_mod.MACOS_LAUNCH_AGENT_LABEL)
+                self.assertEqual(parsed_plist["StartCalendarInterval"], {"Hour": 6, "Minute": 45, "Weekday": 5})
+                self.assertEqual(parsed_plist["Nice"], 19)
+                self.assertTrue(parsed_plist["LowPriorityIO"])
+                self.assertIn("/opt/homebrew/bin/clamscan", parsed_plist["ProgramArguments"])
+                self.assertIn(["launchctl", "load", "-w", str(plist_path)], cmds)
+
+                with (
+                    mock.patch.object(app_mod, "IS_WINDOWS", False),
+                    mock.patch.object(app_mod, "IS_MACOS", True),
+                    mock.patch("subprocess.run", side_effect=_fake_run),
+                ):
+                    res_off = app_mod._helper_macos_set_schedule({"enabled": False})
+                self.assertFalse(res_off["enabled"])
+                self.assertFalse(plist_path.exists())
+                self.assertIn(["launchctl", "unload", str(plist_path)], cmds)
+            finally:
+                app_mod.APP_DATA_DIR = orig_app_dir
+                app_mod.MACOS_SCHEDULE_CONFIG_PATH = orig_cfg
+                app_mod.MACOS_LAUNCH_AGENT_PLIST = orig_plist
                 app_mod.DEFAULT_LOG_PATH = orig_log
 
 

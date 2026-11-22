@@ -223,9 +223,51 @@ jobs:
             release-win/*.zip
             release-win/SHA256SUMS.windows.txt
 
+  build-macos:
+    name: Build macOS Bundle
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip PySide6 pyinstaller
+
+      - name: Build macOS application bundle and zip archive
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          pyinstaller --noconfirm --clean --onefile --windowed \
+            --name clamav-security-center \
+            --add-data "packaging/clamav-kde-gui.svg:packaging" \
+            clamav_gui.py
+
+          mkdir -p build-mac/stage release-mac
+          if [ -d "dist/clamav-security-center.app" ]; then
+            ditto "dist/clamav-security-center.app" "build-mac/stage/ClamAV Security Center.app"
+          elif [ -f "dist/clamav-security-center" ]; then
+            cp "dist/clamav-security-center" "build-mac/stage/"
+          fi
+          cp README.md LICENSE "build-mac/stage/"
+          (cd build-mac/stage && zip -r -y "../../release-mac/ClamAV-Security-Center-macOS.zip" .)
+          (cd release-mac && shasum -a 256 ClamAV-Security-Center-macOS.zip > SHA256SUMS.macos.txt)
+
+      - name: Upload macOS release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-macos
+          path: |
+            release-mac/*.zip
+            release-mac/SHA256SUMS.macos.txt
+
   publish-release:
     name: Publish GitHub Release
-    needs: [build-deb, build-rpm, build-windows]
+    needs: [build-deb, build-rpm, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
