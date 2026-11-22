@@ -1,15 +1,14 @@
 name: ClamAV Security Center CI (Multi-Distro KDE & GNOME)
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
   test-matrix:
     name: "${{ matrix.distro.name }} (${{ matrix.desktop }})"
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 2
       matrix:
         distro:
           - id: opensuse-16
@@ -61,6 +60,13 @@ jobs:
             pkg_type: deb
             rpm_flavor: none
             dist_tag: kubuntu2604
+          - id: archlinux
+            name: Arch Linux
+            image: docker.io/library/archlinux:latest
+            pkg_mgr: pacman
+            pkg_type: arch
+            rpm_flavor: none
+            dist_tag: arch
         desktop:
           - kde
           - gnome
@@ -86,7 +92,7 @@ jobs:
             desktop: gnome
 
     # GitHub-hosted Ubuntu runners executing each target distro in its container image
-    # (opensuse-16, opensuse-16.1, opensuse-tumbleweed, rocky-10, fedora-45 on kde & gnome;
+    # (opensuse-16, opensuse-16.1, opensuse-tumbleweed, rocky-10, fedora-45, and archlinux on kde & gnome;
     # ubuntu-26.04 on gnome; kubuntu-26.04 on kde).
     runs-on: ubuntu-latest
     container:
@@ -175,6 +181,22 @@ jobs:
               fi
               ;;
 
+            pacman)
+              ${SUDO} sed -i 's/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf || true
+              ${SUDO} pacman -Syu --noconfirm --needed \
+                python python-pip pyside6 clamav findutils util-linux polkit procps-ng \
+                libnotify desktop-file-utils xorg-server-xvfb glib2 tar zstd libarchive \
+                mesa libxkbcommon libxkbcommon-x11 dbus qt6-wayland
+              if [ "${TARGET_DESKTOP}" = "gnome" ]; then
+                ${SUDO} pacman -S --noconfirm --needed \
+                  xdg-desktop-portal-gtk adwaita-icon-theme python-gobject || true
+              else
+                ${SUDO} pacman -S --noconfirm --needed xdg-desktop-portal-kde breeze-icons || true
+              fi
+              ${SUDO} sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/; s/^#de_DE.UTF-8 UTF-8/de_DE.UTF-8 UTF-8/' /etc/locale.gen || true
+              ${SUDO} locale-gen || true
+              ;;
+
             *)
               echo "Unsupported package manager: ${PKG_MGR}" >&2
               exit 1
@@ -211,7 +233,7 @@ jobs:
           QT_QPA_PLATFORM=offscreen LANG=de_DE.UTF-8 LC_ALL=de_DE.UTF-8 \
             python3 -m unittest discover -s . -p "test_*.py" -v
 
-      - name: Build and install native DEB / RPM package on runner OS
+      - name: Build and install native DEB / RPM / Arch package on runner OS
         run: |
           SUDO=""
           if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
@@ -233,6 +255,14 @@ jobs:
             else
               ${SUDO} dnf install -y ./dist-ci/*.rpm
             fi
+          elif [ "${PKG_TYPE}" = "arch" ]; then
+            ./packaging/build_packages.sh \
+              --type arch \
+              --version 0.0.1 \
+              --release ci \
+              --out-dir dist-ci
+
+            ${SUDO} pacman -U --noconfirm ./dist-ci/*.pkg.tar.zst
           else
             ./packaging/build_packages.sh \
               --type deb \
@@ -299,11 +329,13 @@ jobs:
             zypper) ${SUDO} zypper --non-interactive remove -y clamav-security-center || true ;;
             dnf)    ${SUDO} dnf remove -y clamav-security-center || true ;;
             apt)    DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get remove -y clamav-security-center || true ;;
+            pacman) ${SUDO} pacman -R --noconfirm clamav-security-center || true ;;
           esac
           rm -rf dist-ci
 
   test-windows:
     name: Windows (Python + PySide6 + ClamAV)
+    needs: [test-matrix]
     runs-on: windows-latest
 
     steps:
@@ -423,6 +455,7 @@ jobs:
 
   test-macos:
     name: macOS (Python + PySide6 + ClamAV)
+    needs: [test-matrix]
     runs-on: macos-latest
 
     steps:

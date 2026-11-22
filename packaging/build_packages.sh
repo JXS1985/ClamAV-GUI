@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build .deb and/or .rpm packages for ClamAV Security Center.
+# Build .deb, .rpm, and/or Arch .pkg.tar.zst packages for ClamAV Security Center.
 # Usage:
 #   ./packaging/build_packages.sh --type rpm --rpm-flavor rocky --version 1.2.0 --release 1
 #   ./packaging/build_packages.sh --type deb --version 1.2.0 --release 1
+#   ./packaging/build_packages.sh --type arch --version 1.2.0 --release 1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -19,7 +20,7 @@ OUT_DIR="${REPO_ROOT}/dist"
 
 usage() {
   cat <<EOF
-Usage: $0 --type <deb|rpm> --version <ver> [--release <rel>] [--rpm-flavor <fedora|rocky|opensuse>] [--dist-tag <tag>] [--out-dir <dir>]
+Usage: $0 --type <deb|rpm|arch> --version <ver> [--release <rel>] [--rpm-flavor <fedora|rocky|opensuse>] [--dist-tag <tag>] [--out-dir <dir>]
 EOF
 }
 
@@ -61,8 +62,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${PKG_TYPE}" || ( "${PKG_TYPE}" != "deb" && "${PKG_TYPE}" != "rpm" ) ]]; then
-  echo "Error: --type must be 'deb' or 'rpm'" >&2
+if [[ -z "${PKG_TYPE}" || ( "${PKG_TYPE}" != "deb" && "${PKG_TYPE}" != "rpm" && "${PKG_TYPE}" != "arch" ) ]]; then
+  echo "Error: --type must be 'deb', 'rpm', or 'arch'" >&2
   exit 1
 fi
 
@@ -77,6 +78,7 @@ if [[ -z "${RELEASE}" ]] || [[ ! "${RELEASE}" =~ ^[0-9A-Za-z.]+$ ]]; then
 fi
 
 mkdir -p "${OUT_DIR}"
+OUT_DIR="$(cd -- "${OUT_DIR}" && pwd)"
 
 render_desktop_file() {
   local dest="$1"
@@ -112,6 +114,21 @@ EOF
   chmod 0755 "${dest}"
 }
 
+stage_usr_payload() {
+  local stage_dir="$1"
+  install -d "${stage_dir}/usr/share/${PKG_NAME}"
+  install -d "${stage_dir}/usr/bin"
+  install -d "${stage_dir}/usr/share/applications"
+  install -d "${stage_dir}/usr/share/icons/hicolor/scalable/apps"
+
+  install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${stage_dir}/usr/share/${PKG_NAME}/clamav_gui.py"
+  install -m 0755 "${REPO_ROOT}/run.sh" "${stage_dir}/usr/share/${PKG_NAME}/run.sh"
+  render_launcher_wrapper "${stage_dir}/usr/bin/${PKG_NAME}"
+  ln -s "${PKG_NAME}" "${stage_dir}/usr/bin/clamav-kde-gui"
+  render_desktop_file "${stage_dir}/usr/share/applications/clamav-kde-gui.desktop"
+  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${stage_dir}/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg"
+}
+
 build_deb() {
   command -v dpkg-deb >/dev/null 2>&1 || {
     echo "Error: dpkg-deb is required to build .deb packages" >&2
@@ -126,17 +143,7 @@ build_deb() {
   stage_dir="${workdir}/${PKG_NAME}_${deb_ver}_all"
 
   install -d "${stage_dir}/DEBIAN"
-  install -d "${stage_dir}/usr/share/${PKG_NAME}"
-  install -d "${stage_dir}/usr/bin"
-  install -d "${stage_dir}/usr/share/applications"
-  install -d "${stage_dir}/usr/share/icons/hicolor/scalable/apps"
-
-  install -m 0755 "${REPO_ROOT}/clamav_gui.py" "${stage_dir}/usr/share/${PKG_NAME}/clamav_gui.py"
-  install -m 0755 "${REPO_ROOT}/run.sh" "${stage_dir}/usr/share/${PKG_NAME}/run.sh"
-  render_launcher_wrapper "${stage_dir}/usr/bin/${PKG_NAME}"
-  ln -s "${PKG_NAME}" "${stage_dir}/usr/bin/clamav-kde-gui"
-  render_desktop_file "${stage_dir}/usr/share/applications/clamav-kde-gui.desktop"
-  install -m 0644 "${SCRIPT_DIR}/clamav-kde-gui.svg" "${stage_dir}/usr/share/icons/hicolor/scalable/apps/clamav-kde-gui.svg"
+  stage_usr_payload "${stage_dir}"
 
   local installed_kb
   installed_kb="$(du -sk "${stage_dir}/usr" | awk '{print $1}')"
@@ -297,7 +304,141 @@ EOF
   done
 }
 
+build_arch() {
+  local workdir stage_dir arch_ver arch_rel arch_file installed_bytes build_date
+  workdir="$(mktemp -d)"
+  trap 'rm -rf "${workdir}"' RETURN
+
+  arch_ver="${VERSION//-/.}"
+  arch_ver="${arch_ver//\~/.}"
+  arch_rel="${RELEASE//-/.}"
+  stage_dir="${workdir}/stage"
+  mkdir -p "${stage_dir}"
+
+  stage_usr_payload "${stage_dir}"
+
+  installed_bytes="$(du -sb "${stage_dir}/usr" | awk '{print $1}')"
+  build_date="$(date +%s)"
+
+  cat > "${stage_dir}/.PKGINFO" <<EOF
+pkgname = ${PKG_NAME}
+pkgbase = ${PKG_NAME}
+pkgver = ${arch_ver}-${arch_rel}
+pkgdesc = ClamAV Security Center GUI for KDE Plasma and GNOME
+url = https://github.com/JXS1985/ClamAV-GUI
+builddate = ${build_date}
+packager = Armin Schneider <JXS1985@users.noreply.github.com>
+size = ${installed_bytes}
+arch = any
+license = GPL-3.0-or-later
+depend = python
+depend = pyside6
+depend = clamav
+depend = findutils
+depend = procps-ng
+depend = polkit
+depend = libnotify
+EOF
+
+  cat > "${stage_dir}/.INSTALL" <<'EOF'
+post_install() {
+  if command -v gtk-update-icon-cache >/dev/null 2>&1 && [ -d /usr/share/icons/hicolor ]; then
+    gtk-update-icon-cache -q -f -t /usr/share/icons/hicolor || true
+  fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  post_install
+}
+EOF
+
+  if command -v bsdtar >/dev/null 2>&1; then
+    (
+      cd "${stage_dir}"
+      LANG=C bsdtar -czf .MTREE --format=mtree \
+        --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256,link' \
+        .PKGINFO .INSTALL usr
+    )
+  else
+    python3 - "${stage_dir}" "${build_date}" <<'PY'
+import gzip
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+stage = Path(sys.argv[1])
+ts = sys.argv[2]
+lines = ["#mtree", "/set type=file uid=0 gid=0 mode=644"]
+
+for root_name in (".PKGINFO", ".INSTALL"):
+    p = stage / root_name
+    data = p.read_bytes()
+    lines.append(
+        f"./{root_name} time={ts}.0 mode=644 size={len(data)} "
+        f"md5digest={hashlib.md5(data).hexdigest()} "
+        f"sha256digest={hashlib.sha256(data).hexdigest()}"
+    )
+
+usr_root = stage / "usr"
+paths = [usr_root]
+for dirpath, dirnames, filenames in os.walk(usr_root):
+    dirnames.sort()
+    filenames.sort()
+    for d in dirnames:
+        paths.append(Path(dirpath) / d)
+    for f in filenames:
+        paths.append(Path(dirpath) / f)
+
+for p in paths:
+    rel = "./" + p.relative_to(stage).as_posix()
+    st = p.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        lines.append(f"{rel} time={ts}.0 mode=777 type=link link={os.readlink(p)}")
+    elif stat.S_ISDIR(st.st_mode):
+        lines.append(f"{rel} time={ts}.0 mode=755 type=dir")
+    else:
+        data = p.read_bytes()
+        mode = stat.S_IMODE(st.st_mode)
+        lines.append(
+            f"{rel} time={ts}.0 mode={mode:o} size={len(data)} "
+            f"md5digest={hashlib.md5(data).hexdigest()} "
+            f"sha256digest={hashlib.sha256(data).hexdigest()}"
+        )
+
+payload = ("\n".join(lines) + "\n").encode("utf-8")
+with open(stage / ".MTREE", "wb") as raw_f:
+    with gzip.GzipFile(filename="", mode="wb", mtime=int(ts), fileobj=raw_f) as gz:
+        gz.write(payload)
+PY
+  fi
+
+  arch_file="${OUT_DIR}/${PKG_NAME}-${arch_ver}-${arch_rel}-any.pkg.tar.zst"
+  if command -v tar >/dev/null 2>&1 && tar --help 2>&1 | grep -q -- '--zstd'; then
+    tar --zstd --owner=0 --group=0 -cf "${arch_file}" -C "${stage_dir}" .PKGINFO .MTREE .INSTALL usr
+  elif command -v bsdtar >/dev/null 2>&1; then
+    (
+      cd "${stage_dir}"
+      bsdtar --zstd -cf "${arch_file}" .PKGINFO .MTREE .INSTALL usr
+    )
+  else
+    echo "Error: tar --zstd or bsdtar is required to build .pkg.tar.zst packages" >&2
+    exit 1
+  fi
+  echo "Built Arch package: ${arch_file}"
+  tar --zstd -tvf "${arch_file}"
+}
+
 case "${PKG_TYPE}" in
   deb) build_deb ;;
   rpm) build_rpm ;;
+  arch) build_arch ;;
 esac

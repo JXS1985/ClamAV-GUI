@@ -1,10 +1,7 @@
-name: Build & Release DEB & RPM Packages
+name: Build & Release DEB, RPM, Arch, Windows & macOS Packages
 
-# Trigger manually or automatically when pushing a release tag (e.g. v1.0.0).
+# Trigger manually via Actions -> Run workflow.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -64,10 +61,57 @@ jobs:
             dist/*.deb
             dist/SHA256SUMS.deb.txt
 
+  build-arch:
+    name: Build Arch Linux (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/archlinux:latest
+    env:
+      INPUT_VERSION: ${{ inputs.version }}
+      PKG_RELEASE: ${{ inputs.release || '1' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Arch packaging tools
+        run: |
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          ${SUDO} sed -i 's/^#DisableSandbox/DisableSandbox/' /etc/pacman.conf || true
+          ${SUDO} pacman -Syu --noconfirm --needed \
+            bash tar zstd libarchive desktop-file-utils python coreutils findutils sed gawk
+
+      - name: Build .pkg.tar.zst package
+        run: |
+          PKG_VERSION="${INPUT_VERSION:-${GITHUB_REF_NAME#v}}"
+          PKG_VERSION="${PKG_VERSION#v}"
+          echo "Resolved Arch package version: ${PKG_VERSION}-${PKG_RELEASE}"
+          chmod +x packaging/build_packages.sh
+          ./packaging/build_packages.sh \
+            --type arch \
+            --version "${PKG_VERSION}" \
+            --release "${PKG_RELEASE}" \
+            --out-dir dist
+          (cd dist && sha256sum *.pkg.tar.zst > SHA256SUMS.arch.txt)
+          ls -lh dist/
+
+      - name: Upload Arch package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clamav-security-center-arch-${{ inputs.version || github.ref_name }}-${{ inputs.release || '1' }}
+          path: |
+            dist/*.pkg.tar.zst
+            dist/SHA256SUMS.arch.txt
+
   build-rpm:
     name: "Build RPM (${{ matrix.target.name }})"
+    needs: [build-deb, build-arch]
     strategy:
-      fail-fast: false
+      fail-fast: true
+      max-parallel: 2
       matrix:
         target:
           - image: registry.opensuse.org/opensuse/leap:16.0
@@ -158,6 +202,7 @@ jobs:
 
   build-windows:
     name: Build Windows x64 Bundle
+    needs: [build-rpm]
     runs-on: windows-latest
 
     steps:
@@ -225,6 +270,7 @@ jobs:
 
   build-macos:
     name: Build macOS Bundle
+    needs: [build-rpm]
     runs-on: macos-latest
 
     steps:
@@ -267,7 +313,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-deb, build-rpm, build-windows, build-macos]
+    needs: [build-deb, build-arch, build-rpm, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -292,5 +338,6 @@ jobs:
           files: |
             release-assets/*.deb
             release-assets/*.rpm
+            release-assets/*.pkg.tar.zst
             release-assets/*.zip
             release-assets/SHA256SUMS*.txt

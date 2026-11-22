@@ -39,6 +39,10 @@ def verify_package_files(pkg_type: str) -> None:
         res = subprocess.run(["dpkg", "-S", str(INSTALLED_DESKTOP)], capture_output=True, text=True, check=False)
         assert res.returncode == 0, f"dpkg -S failed: {res.stderr}"
         print(f"[os-verify] DEB owns desktop entry: {res.stdout.strip()}")
+    elif pkg_type == "arch":
+        res = subprocess.run(["pacman", "-Qo", str(INSTALLED_DESKTOP)], capture_output=True, text=True, check=False)
+        assert res.returncode == 0, f"pacman -Qo failed: {res.stderr}"
+        print(f"[os-verify] Arch package owns desktop entry: {res.stdout.strip()}")
 
     st_res = subprocess.run([str(INSTALLED_BIN), "--self-test"], capture_output=True, text=True, check=False)
     assert st_res.returncode == 0, f"Installed --self-test failed:\n{st_res.stdout}\n{st_res.stderr}"
@@ -237,7 +241,7 @@ def verify_notification_and_tray_entry(desktop: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify installed ClamAV Security Center OS package")
-    parser.add_argument("--pkg-type", choices=("rpm", "deb"), required=True)
+    parser.add_argument("--pkg-type", choices=("rpm", "deb", "arch"), required=True)
     parser.add_argument("--desktop", choices=("kde", "gnome"), required=True)
     args = parser.parse_args()
 

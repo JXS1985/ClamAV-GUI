@@ -22,11 +22,11 @@ Open-source cross-platform Qt6 desktop control center for **Linux** (KDE Plasma 
 
 ## Installation
 
-Pre-built packages and archives are attached to every tag release on the [GitHub Releases](https://github.com/JXS1985/ClamAV-GUI/releases) page (`.deb`, `.rpm`, `ClamAV-Security-Center-Windows-x64.zip`, and `ClamAV-Security-Center-macOS.zip`), or you can run directly from source.
+Pre-built packages and archives are attached to every tag release on the [GitHub Releases](https://github.com/JXS1985/ClamAV-GUI/releases) page (`.deb`, `.rpm`, Arch `.pkg.tar.zst`, `ClamAV-Security-Center-Windows-x64.zip`, and `ClamAV-Security-Center-macOS.zip`), or you can run directly from source.
 
 ### Linux (KDE Plasma & GNOME)
 
-#### Option A: Native `.deb` / `.rpm` Package (from GitHub Releases)
+#### Option A: Native `.deb` / `.rpm` / Arch `.pkg.tar.zst` Package (from GitHub Releases)
 
 ```bash
 # Ubuntu / Debian / Kubuntu
@@ -37,6 +37,9 @@ sudo dnf install ./clamav-security-center-*.rpm
 
 # openSUSE Leap / Tumbleweed
 sudo zypper install ./clamav-security-center-*.rpm
+
+# Arch Linux (KDE Plasma & GNOME)
+sudo pacman -U ./clamav-security-center-*.pkg.tar.zst
 ```
 
 After installation, launch **ClamAV Security Center** from your application menu or run `clamav-security-center` in a terminal.
@@ -54,6 +57,9 @@ sudo dnf install python3 python3-pyside6 clamav clamav-freshclam polkit findutil
 
 # openSUSE Leap / Tumbleweed
 sudo zypper install python3-qt6 clamav polkit findutils procps libnotify-tools
+
+# Arch Linux (KDE Plasma & GNOME)
+sudo pacman -S python pyside6 clamav polkit findutils procps-ng libnotify
 ```
 
 Clone and launch:
@@ -188,9 +194,9 @@ Code crossing the GUI / `--helper` JSON-RPC (`stdin`/`stdout`) boundary enforces
 
 ---
 
-## Building Native Packages (`.deb` / `.rpm`)
+## Building Native Packages (`.deb` / `.rpm` / Arch `.pkg.tar.zst`)
 
-Use [`packaging/build_packages.sh`](packaging/build_packages.sh):
+Use [`packaging/build_packages.sh`](packaging/build_packages.sh) (or [`packaging/PKGBUILD`](packaging/PKGBUILD) on Arch Linux):
 
 ```bash
 # Debian / Ubuntu / Kubuntu (.deb)
@@ -201,9 +207,12 @@ Use [`packaging/build_packages.sh`](packaging/build_packages.sh):
 
 # openSUSE Leap / Tumbleweed (.rpm)
 ./packaging/build_packages.sh --type rpm --rpm-flavor opensuse --dist-tag tw --version 1.0.0 --release 1
+
+# Arch Linux (.pkg.tar.zst)
+./packaging/build_packages.sh --type arch --version 1.0.0 --release 1
 ```
 
-GitHub Actions CI (`.github/workflows/ci.yml`) tests across **openSUSE Leap 16 / 16.1 / Tumbleweed**, **Rocky Linux 10**, **Fedora 45**, **Ubuntu 26.04 (GNOME)**, **Kubuntu 26.04 (KDE)**, **Windows** (including Chocolatey ClamAV, live `clamscan.exe`, and PyInstaller `.exe` `--self-test`), and **macOS**. Pushing a `v*` tag triggers `.github/workflows/build-packages.yml` to build and attach `.deb`, `.rpm`, Windows `.zip`, macOS `.zip`, and `SHA256SUMS` assets to the GitHub Release.
+GitHub Actions CI (`.github/workflows/ci.yml`, manual `workflow_dispatch`, max 2 runners in parallel, `fail-fast`) tests across **Arch Linux (KDE & GNOME)**, **openSUSE Leap 16 / 16.1 / Tumbleweed**, **Rocky Linux 10**, **Fedora 45**, **Ubuntu 26.04 (GNOME)**, **Kubuntu 26.04 (KDE)**, **Windows** (including Chocolatey ClamAV, live `clamscan.exe`, and PyInstaller `.exe` `--self-test`), and **macOS** (including Homebrew ClamAV, live `clamscan`, and PyInstaller `--self-test`). `.github/workflows/build-packages.yml` (manual `workflow_dispatch`, max 2 runners in parallel) builds `.deb`, Arch `.pkg.tar.zst`, `.rpm`, Windows `.zip`, and macOS `.zip` packages.
 
 ---
 

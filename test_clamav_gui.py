@@ -1114,6 +1114,7 @@ class TestSecurityHardening(unittest.TestCase):
                 mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="pkg-1.0", stderr="")),
             ):
                 vos.verify_package_files("rpm")
+                vos.verify_package_files("arch")
                 vos.verify_start_menu_entry("gnome")
 
 
