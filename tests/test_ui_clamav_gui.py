@@ -26,6 +26,7 @@ try:
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QDialog,
         QFileDialog,
         QInputDialog,
@@ -40,6 +41,7 @@ except ImportError:
     from PyQt6.QtTest import QTest  # type: ignore[no-redef]
     from PyQt6.QtWidgets import (  # type: ignore[no-redef]
         QApplication,
+        QCheckBox,
         QDialog,
         QFileDialog,
         QInputDialog,
@@ -110,6 +112,75 @@ class _UIEnvMixin:
         self.win._update_controls_enabled()
         self.win._update_hero_banner(None)
         self.win._qt_app.processEvents()
+
+
+class TestUILoginSettings(unittest.TestCase, _UIEnvMixin):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._setup_isolated_env()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._teardown_isolated_env()
+
+    def test_login_opt_in_enable_disable_and_write_failure(self) -> None:
+        with mock.patch.object(app_mod.autostart, "is_enabled", side_effect=[False, True]), mock.patch.object(
+            app_mod.autostart, "set_enabled", side_effect=[None, PermissionError("access denied"), None]
+        ) as set_enabled, mock.patch.object(QMessageBox, "exec", return_value=0) as warning:
+            def enable(dialog: QDialog) -> int:
+                self.assertEqual(dialog.windowTitle(), "Settings")
+                checkbox = dialog.findChild(QCheckBox)
+                self.assertEqual(checkbox.text(), "Launch minimized at login")
+                self.assertFalse(checkbox.isChecked())
+                set_enabled.assert_not_called()
+                checkbox.click()
+                self.assertTrue(checkbox.isChecked())
+                return 0
+
+            with mock.patch.object(QDialog, "exec", enable):
+                QTest.mouseClick(self.win.settings_btn, Qt.MouseButton.LeftButton)
+
+            def disable(dialog: QDialog) -> int:
+                checkbox = dialog.findChild(QCheckBox)
+                self.assertTrue(checkbox.isChecked())
+                checkbox.click()
+                self.assertTrue(checkbox.isChecked())
+                warning.assert_called_once()
+                checkbox.click()
+                self.assertFalse(checkbox.isChecked())
+                return 0
+
+            with mock.patch.object(QDialog, "exec", disable):
+                QTest.mouseClick(self.win.settings_btn, Qt.MouseButton.LeftButton)
+
+            self.assertEqual(set_enabled.call_args_list, [
+                mock.call(True, app_mod.SCRIPT_PATH),
+                mock.call(False, app_mod.SCRIPT_PATH),
+                mock.call(False, app_mod.SCRIPT_PATH),
+            ])
+
+    def test_login_setting_read_failure_does_not_change_registration(self) -> None:
+        with mock.patch.object(app_mod.autostart, "is_enabled", side_effect=PermissionError), mock.patch.object(
+            app_mod.autostart, "set_enabled"
+        ) as set_enabled, mock.patch.object(QMessageBox, "exec", return_value=0) as warning:
+            QTest.mouseClick(self.win.settings_btn, Qt.MouseButton.LeftButton)
+        warning.assert_called_once()
+        set_enabled.assert_not_called()
+
+    def test_minimized_launch_can_be_restored_without_a_tray(self) -> None:
+        self.assertIsNone(self.win._tray_icon)
+        with mock.patch.object(app_mod, "create_main_window", return_value=self.win), mock.patch.object(
+            self.win._qt_app, "exec", return_value=0
+        ):
+            self.win.hide()
+            self.assertEqual(app_mod.launch_gui(start_minimized=True), 0)
+            self.assertTrue(self.win.isMinimized())
+            self.win.showNormal()
+            self.assertFalse(self.win.isMinimized())
+            self.win.hide()
+            self.assertEqual(app_mod.launch_gui(), 0)
+            self.assertTrue(self.win.isVisible())
+            self.assertFalse(self.win.isMinimized())
 
 
 class TestUIInitialLayoutAndCompactMode(unittest.TestCase, _UIEnvMixin):
@@ -1835,7 +1906,7 @@ class TestUIDependencyAndDatabaseStatus(unittest.TestCase, _UIEnvMixin):
                             )
 
                     # Non-wrapped action buttons must fit text width inside widget rect
-                    for btn in (w.about_btn, w.sudo_btn, w.pkexec_btn, w.user_mode_btn, w.toggle_tabs_btn):
+                    for btn in (w.settings_btn, w.about_btn, w.sudo_btn, w.pkexec_btn, w.user_mode_btn, w.toggle_tabs_btn):
                         txt = btn.text().replace("&&", "&")
                         txt_w = btn.fontMetrics().horizontalAdvance(txt)
                         self.assertLessEqual(

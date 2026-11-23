@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from clamav_backend import posix_files, posix_process, rpc
+from clamav_backend import autostart, posix_files, posix_process, rpc
 from clamav_backend.posix_process import (
     _inspect_proc_io,
     parse_proc_stat,
@@ -193,6 +193,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Continue in User Mode",
         "quit_btn": "Quit",
         "about_btn": "About",
+        "settings_btn": "Settings",
+        "login_minimized_chk": "Launch minimized at login",
+        "login_setting_error": "Could not access the launch-at-login setting.",
         "dlg_about_title": "About ClamAV Security Center",
         "about_desc": "Open-source Linux desktop control center for ClamAV antivirus scanning, quarantine, and scheduled background protection.",
         "about_version_lbl": "Version:",
@@ -476,6 +479,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Im Benutzermodus fortfahren",
         "quit_btn": "Beenden",
         "about_btn": "Über",
+        "settings_btn": "Einstellungen",
+        "login_minimized_chk": "Bei der Anmeldung minimiert starten",
+        "login_setting_error": "Auf die Einstellung für den Start bei der Anmeldung konnte nicht zugegriffen werden.",
         "dlg_about_title": "Über ClamAV Sicherheitszentrum",
         "about_desc": "Open-Source-Desktop-Kontrollzentrum für Linux zur Verwaltung von ClamAV-Scans, Quarantäne und geplantem Hintergrundschutz.",
         "about_version_lbl": "Version:",
@@ -759,6 +765,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Continuar en modo usuario",
         "quit_btn": "Salir",
         "about_btn": "Acerca de",
+        "settings_btn": "Configuración",
+        "login_minimized_chk": "Abrir minimizado al iniciar sesión",
+        "login_setting_error": "No se pudo acceder a la configuración de inicio de sesión.",
         "dlg_about_title": "Acerca de Centro de Seguridad ClamAV",
         "about_desc": "Centro de control de código abierto para Linux con análisis ClamAV, cuarentena y protección programada en segundo plano.",
         "about_version_lbl": "Versión:",
@@ -1042,6 +1051,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Continuer en mode utilisateur",
         "quit_btn": "Quitter",
         "about_btn": "À propos",
+        "settings_btn": "Paramètres",
+        "login_minimized_chk": "Lancer en mode réduit à la connexion",
+        "login_setting_error": "Impossible d’accéder au paramètre de lancement à la connexion.",
         "dlg_about_title": "À propos du Centre de sécurité ClamAV",
         "about_desc": "Centre de contrôle open source pour Linux dédié aux analyses ClamAV, à la quarantaine et à la protection planifiée.",
         "about_version_lbl": "Version :",
@@ -1325,6 +1337,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Continuar no modo usuário",
         "quit_btn": "Sair",
         "about_btn": "Sobre",
+        "settings_btn": "Configurações",
+        "login_minimized_chk": "Iniciar minimizado ao entrar",
+        "login_setting_error": "Não foi possível acessar a configuração de inicialização ao entrar.",
         "dlg_about_title": "Sobre a Central de Segurança ClamAV",
         "about_desc": "Central de controle de código aberto para Linux com verificações ClamAV, quarentena e proteção agendada em segundo plano.",
         "about_version_lbl": "Versão:",
@@ -1608,6 +1623,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "以用户模式继续",
         "quit_btn": "退出",
         "about_btn": "关于",
+        "settings_btn": "设置",
+        "login_minimized_chk": "登录时以最小化方式启动",
+        "login_setting_error": "无法访问登录时启动的设置。",
         "dlg_about_title": "关于 ClamAV 安全中心",
         "about_desc": "面向 Linux 的开源桌面安全控制中心，提供 ClamAV 病毒扫描、隔离管理与后台定时防护。",
         "about_version_lbl": "版本：",
@@ -1891,6 +1909,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "ユーザーモードで続行",
         "quit_btn": "終了",
         "about_btn": "概要",
+        "settings_btn": "設定",
+        "login_minimized_chk": "ログイン時に最小化して起動する",
+        "login_setting_error": "ログイン時の起動設定にアクセスできませんでした。",
         "dlg_about_title": "ClamAV セキュリティセンターについて",
         "about_desc": "ClamAV スキャン、隔離、定期バックグラウンド保護を行うオープンソースの Linux デスクトップ管理ツールです。",
         "about_version_lbl": "バージョン:",
@@ -2174,6 +2195,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "continue_user_mode_btn": "Продолжить без root",
         "quit_btn": "Выход",
         "about_btn": "О программе",
+        "settings_btn": "Настройки",
+        "login_minimized_chk": "Запускать свёрнутым при входе в систему",
+        "login_setting_error": "Не удалось получить доступ к настройке запуска при входе в систему.",
         "dlg_about_title": "О программе Центр безопасности ClamAV",
         "about_desc": "Центр управления с открытым исходным кодом для Linux: проверка ClamAV, карантин и фоновая защита по расписанию.",
         "about_version_lbl": "Версия:",
@@ -6298,6 +6322,12 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
                 else "QPushButton { border: none; background: transparent; color: #64748b; padding: 4px 6px; font-weight: 500; }"
                 "QPushButton:hover { color: #111827; }"
             )
+            self.settings_btn = self._reg_text(QPushButton(), "settings_btn")
+            self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.settings_btn.setStyleSheet(link_btn_css)
+            self.settings_btn.clicked.connect(self._show_settings_dialog)
+            header_row.addWidget(self.settings_btn)
+
             self.about_btn = self._reg_text(QPushButton(), "about_btn")
             self.about_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.about_btn.setStyleSheet(link_btn_css)
@@ -8778,6 +8808,42 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
 
             self._refresh_metadata()
 
+        def _show_settings_dialog(self) -> None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(self._tr("settings_btn"))
+
+            def show_error(error: OSError) -> None:
+                warning = QMessageBox(dialog)
+                warning.setIcon(QMessageBox.Icon.Warning)
+                warning.setWindowTitle(self._tr("settings_btn"))
+                warning.setText(self._tr("login_setting_error"))
+                warning.setDetailedText(str(error))
+                warning.exec()
+
+            try:
+                enabled = autostart.is_enabled()
+            except OSError as error:
+                show_error(error)
+                return
+
+            checkbox = QCheckBox(self._tr("login_minimized_chk"), dialog)
+            checkbox.setChecked(enabled)
+
+            def change_login_setting(checked: bool) -> None:
+                try:
+                    autostart.set_enabled(checked, SCRIPT_PATH)
+                except OSError as error:
+                    checkbox.setChecked(not checked)
+                    show_error(error)
+
+            checkbox.clicked.connect(change_login_setting)
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(checkbox)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dialog.accept)
+            layout.addWidget(buttons)
+            dialog.exec()
+
         def _show_about_dialog(self) -> None:
             dlg = QDialog(self)
             dlg.setWindowTitle(self._tr("dlg_about_title"))
@@ -8846,10 +8912,13 @@ def create_main_window(auto_poll: bool = False, lang: str | None = None) -> Any:
     return window
 
 
-def launch_gui(lang: str | None = None) -> int:
+def launch_gui(lang: str | None = None, start_minimized: bool = False) -> int:
     """Initialize and run the Qt6 GUI event loop."""
     window = create_main_window(auto_poll=True, lang=lang)
-    window.show()
+    if start_minimized:
+        window.showMinimized()
+    else:
+        window.show()
     return int(window._qt_app.exec())
 
 
@@ -8858,6 +8927,7 @@ def main() -> int:
     parser.add_argument("--helper", action="store_true", help="Run internal root JSON helper")
     parser.add_argument("--elevated-helper", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-test", action="store_true", help="Run automated diagnostics")
+    parser.add_argument(autostart.MINIMIZED_FLAG, action="store_true", help="Start with the window minimized")
     parser.add_argument(
         "--lang",
         choices=("auto", *sorted(TRANSLATIONS.keys())),
@@ -8880,7 +8950,7 @@ def main() -> int:
     if args.self_test:
         return run_self_test()
     chosen_lang = None if args.lang == "auto" else args.lang
-    return launch_gui(lang=chosen_lang)
+    return launch_gui(lang=chosen_lang, start_minimized=args.start_minimized)
 
 
 if __name__ == "__main__":

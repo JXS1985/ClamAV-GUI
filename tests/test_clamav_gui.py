@@ -832,13 +832,19 @@ class TestLocalizationAndCLI(unittest.TestCase):
             app_mod, "launch_gui", return_value=0
         ) as mock_gui:
             self.assertEqual(app_mod.main(), 0)
-            mock_gui.assert_called_once_with(lang="de")
+            mock_gui.assert_called_once_with(lang="de", start_minimized=False)
 
         with mock.patch.object(sys, "argv", ["clamav_gui.py"]), mock.patch.object(
             app_mod, "launch_gui", return_value=0
         ) as mock_gui2:
             self.assertEqual(app_mod.main(), 0)
-            mock_gui2.assert_called_once_with(lang=None)
+            mock_gui2.assert_called_once_with(lang=None, start_minimized=False)
+
+        with mock.patch.object(sys, "argv", ["clamav_gui.py", "--start-minimized"]), mock.patch.object(
+            app_mod, "launch_gui", return_value=0
+        ) as mock_minimized:
+            self.assertEqual(app_mod.main(), 0)
+            mock_minimized.assert_called_once_with(lang=None, start_minimized=True)
 
 
 class TestDesktopEnvironmentIntegration(unittest.TestCase):

@@ -170,12 +170,19 @@ Open the **Schedule & Custom Scan** tab:
 - **Automatic Schedules:** Enable daily or weekly scheduled background scans (`Quick` or `Full`), pick the day and time, and click **Save Schedule**. Uses `systemd` system timers (Linux root), `systemd --user` timers (Linux User Mode), Windows Task Scheduler `schtasks` (`%LOCALAPPDATA%\clamav-kde-gui\scheduled-scan.cmd`), or macOS `launchd` LaunchAgents (`~/Library/LaunchAgents`).
 - **Custom Scan Builder:** Choose a target path, adjust scan limits and exclusions, and inspect the command preview. Delegated Linux scans use **Report only**. The Threats tab offers quarantine and deletion after review.
 
+### 6. Starting the App at Login
+
+Open **Settings** and enable **Launch minimized at login**. This option is off by default and applies to your user account on Linux, macOS, and Windows. At your next login, restore the app from the taskbar or Dock. Opening the app yourself still shows the main window normally.
+
+Put the macOS app in Applications or the portable Windows executable in its permanent folder before enabling the option. If you move the app afterward, turn the option off and back on to update its location.
+
 ---
 
 ## CLI Options
 
 ```bash
 ./run.sh --lang de       # Force UI language (en, de, es, fr, pt, zh, ja, ru)
+./run.sh --start-minimized  # Open the window minimized for this launch
 ./run.sh --self-test     # Run built-in diagnostics & JSON-RPC helper checks
 ./run.sh --helper        # Run headless JSON-RPC helper mode
 ```
